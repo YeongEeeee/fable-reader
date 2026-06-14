@@ -28,8 +28,31 @@
   <meta name="theme-color" content="#fcfbf7">
   <link rel="stylesheet" href="./style.css">
 
-  <!-- epub.js: app.js보다 먼저 동기 로드 -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/epubjs/0.3.93/epub.min.js"></script>
+  <!--
+    ┌─────────────────────────────────────────────────────────────┐
+    │ EPUB 엔진 의존성 로드 (순서 중요!)                          │
+    │                                                             │
+    │ epub.js 0.3.93은 UMD 빌드로, 내부에서 전역 window.JSZip을     │
+    │ 요구합니다(t.ePub = e(t.JSZip)). JSZip이 먼저 로드되지        │
+    │ 않으면 EPUB(ZIP) 압축 해제가 실패하여, 특히 다중 파일         │
+    │ 등록 시 멈춤(Freezing) 현상이 발생합니다.                    │
+    │                                                             │
+    │ 따라서 ① JSZip → ② epub.js 순서로 로드하며,                  │
+    │ cdnjs 404 회피를 위해 npm 미러(jsDelivr)를 1차로 사용하고     │
+    │ onerror 시 unpkg로 폴백하는 체인을 구성합니다.               │
+    └─────────────────────────────────────────────────────────────┘
+  -->
+  <!-- ① JSZip (epub.js 필수 선행 의존성) -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"
+    onerror="this.onerror=null;this.remove();var s=document.createElement('script');s.src='https://unpkg.com/jszip@3.10.1/dist/jszip.min.js';document.head.appendChild(s);"
+  ></script>
+
+  <!-- ② epub.js 0.3.93 (npm 미러 → 폴백 체인) -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"
+    onerror="this.onerror=null;this.remove();var s=document.createElement('script');s.src='https://unpkg.com/epubjs@0.3.93/dist/epub.min.js';s.onerror=function(){this.onerror=null;this.remove();var s2=document.createElement('script');s2.src='https://cdnjs.cloudflare.com/ajax/libs/epubjs/0.3.93/epub.min.js';document.head.appendChild(s2);};document.head.appendChild(s);"
+  ></script>
 </head>
 <body>
 

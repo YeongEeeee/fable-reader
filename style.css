@@ -198,10 +198,6 @@ html, body {
   background: linear-gradient(90deg, var(--color-border-soft) 25%, var(--color-paper-alt) 50%, var(--color-border-soft) 75%);
   background-size: 200% 100%;
   animation: skeleton-shimmer 1.4s ease-in-out infinite;
-  /* [3] GPU 하드웨어 레이어 강제 격리 — 저가형 단말 CPU 레이아웃 오버헤드 제거 */
-  will-change: background-position, transform, opacity;
-  transform: translateZ(0);
-  backface-visibility: hidden;
 }
 
 @keyframes skeleton-shimmer {
@@ -845,10 +841,6 @@ body.viewer-active .settings-panel {
   opacity: 0; transform: translateY(12px);
   animation: toast-in 280ms var(--ease-out) forwards;
   pointer-events: none;
-  /* [3] GPU 하드웨어 레이어 강제 격리 */
-  will-change: transform, opacity;
-  transform: translateZ(0) translateY(12px);
-  backface-visibility: hidden;
 }
 .toast.error   { background: var(--color-toast-error); }
 .toast.success { background: var(--color-toast-success); }
@@ -1779,17 +1771,13 @@ body[data-theme="white"] .card-menu-popup { background: #fff; }
 /* ── [3]-5 토스트 스택 스프링 물리 모션 ── */
 .toast {
   animation: toast-spring-in 420ms var(--ease-spring) forwards;
-  /* [3] GPU 가속 하드웨어 레이어 격리 (스프링 모션 CPU 오버헤드 차단) */
-  will-change: transform, opacity;
-  transform: translateZ(0);
-  backface-visibility: hidden;
 }
 @keyframes toast-spring-in {
   0%   { opacity: 0; transform: translateY(20px) scale(0.9); }
   60%  { opacity: 1; transform: translateY(-4px) scale(1.02); }
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
-.toast-container { transition: transform 320ms var(--ease-spring); will-change: transform; transform: translateZ(0); }
+.toast-container { transition: transform 320ms var(--ease-spring); }
 
 /* ── [3]-7 다크모드 본문 이미지 대비 감쇄 (iframe 외 UI 이미지) ── */
 body[data-theme="dark"] .recent-cover img,

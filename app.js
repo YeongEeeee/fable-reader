@@ -1146,33 +1146,61 @@ async function extractCoverDataUrl(book) {
    §16. epub.js 렌더링 엔진
    ══════════════════════════════════════════════════════════ */
 /**
- * [B1] ePub 폴드 가드 — window.ePub 존재 확인
- * epub.js CDN이 아직 파싱 중이라면 최대 5초 대기
+ * [B1] ePub 비동기 런타임 가드 (리팩토링)
+ * window.ePub 과 그 필수 의존성 window.JSZip 이 모두 준비됐는지 확인.
+ * 즉시 없으면 throw 하지 않고 50ms 간격으로 최대 maxWaitMs(기본 3초) 재시도.
+ * 폴백 CDN 체인이 늦게 도착해도 안전하게 기다렸다가 true/false를 반환.
+ *
+ * @returns {Promise<boolean>} 라이브러리 가용 여부
  */
-async function waitForEpubJS(maxWaitMs = 5000) {
-  if (typeof window.ePub === 'function') return true;
+function isEpubRuntimeReady() {
+  /* epub.js 0.3.x는 JSZip 전역을 요구하므로 둘 다 검사 */
+  return typeof window.ePub === 'function' && typeof window.JSZip === 'function';
+}
+
+async function waitForEpubJS(maxWaitMs = 3000) {
+  if (isEpubRuntimeReady()) return true;
 
   return new Promise((resolve) => {
     const start    = Date.now();
     const interval = setInterval(() => {
-      if (typeof window.ePub === 'function') {
+      if (isEpubRuntimeReady()) {
         clearInterval(interval);
         resolve(true);
         return;
       }
       if (Date.now() - start >= maxWaitMs) {
         clearInterval(interval);
+        /* ePub은 떴는데 JSZip만 없으면 진단 로그 (다중 등록 멈춤의 주요 원인) */
+        if (typeof window.ePub === 'function' && typeof window.JSZip !== 'function') {
+          console.warn('[Fable] JSZip 전역이 로드되지 않았습니다. EPUB 압축 해제가 실패할 수 있습니다.');
+        }
         resolve(false);
       }
     }, 50);
   });
 }
 
+/**
+ * book.ready 타임아웃 가드
+ * JSZip 누락·손상 EPUB 등으로 book.ready가 영원히 pending 되는 경우
+ * 루프(다중 등록/전체 검색)가 통째로 멈추는 것을 방지한다.
+ * @param {object} book  epub.js Book 인스턴스
+ * @param {number} ms    타임아웃(ms)
+ * @returns {Promise<boolean>} 준비 완료 여부 (timeout 시 false)
+ */
+function awaitBookReady(book, ms = 12000) {
+  return Promise.race([
+    book.ready.then(() => true).catch(() => false),
+    new Promise((resolve) => setTimeout(() => resolve(false), ms)),
+  ]);
+}
+
 async function openEpubBook(fileData, isBuffer = false) {
   /* [B1] ePub 가드 */
   const epubReady = await waitForEpubJS();
   if (!epubReady) {
-    Toast.show('epub.js 라이브러리를 로드하지 못했습니다. 페이지를 새로고침해 주세요.', 'error');
+    Toast.show('EPUB 엔진(epub.js/JSZip)을 로드하지 못했습니다. 네트워크 확인 후 새로고침해 주세요.', 'error');
     return;
   }
 
@@ -1521,16 +1549,13 @@ const NavGuard = (() => {
    §20. locations 백그라운드 생성
    ══════════════════════════════════════════════════════════ */
 function generateLocationsBackground(book) {
-  /* [2] window.Worker 가용성 + 생성 예외 동시 가드 */
-  if (typeof window !== 'undefined' && typeof window.Worker === 'function') {
-    try {
-      const code = `self.onmessage=function(e){var l=e.data.spineLength||10,list=[];for(var i=0;i<l;i++)list.push("epubcfi(/6/"+(i*2+2)+"[s"+i+"]!/4/2)");self.postMessage({list:list});};`;
-      const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-      const w   = new Worker(url);
-      w.postMessage({ spineLength: book.spine?.items?.length || 10 });
-      w.onmessage = (e) => { store.totalLocations = e.data.list.length; URL.revokeObjectURL(url); w.terminate(); };
-      w.onerror   = () => { URL.revokeObjectURL(url); w.terminate(); };
-    } catch (_) { /* 워커 생성 거부 시 아래 메인스레드 generate로 자연 폴백 */ }
+  if (typeof Worker !== 'undefined') {
+    const code = `self.onmessage=function(e){var l=e.data.spineLength||10,list=[];for(var i=0;i<l;i++)list.push("epubcfi(/6/"+(i*2+2)+"[s"+i+"]!/4/2)");self.postMessage({list:list});};`;
+    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+    const w   = new Worker(url);
+    w.postMessage({ spineLength: book.spine?.items?.length || 10 });
+    w.onmessage = (e) => { store.totalLocations = e.data.list.length; URL.revokeObjectURL(url); w.terminate(); };
+    w.onerror   = () => { URL.revokeObjectURL(url); w.terminate(); };
   }
   book.locations.generate(1600).then(l => { store.totalLocations = Math.max(store.totalLocations, l.length); }).catch(() => {});
 }
@@ -1727,12 +1752,10 @@ function computeFileHash(file) {
 const HashWorker = (() => {
   let worker = null;
   let seq = 0;
-  let workerSupported = (typeof window !== 'undefined' && typeof window.Worker === 'function');
   const pending = new Map();
 
   function _ensure() {
-    /* [2] Web Worker 미지원/생성거부 환경이면 즉시 우회 */
-    if (!workerSupported || worker) return;
+    if (worker) return;
     const code = `
       self.onmessage = function(e) {
         var id = e.data.id, name = e.data.name, size = e.data.size, sample = e.data.sample;
@@ -1752,37 +1775,24 @@ const HashWorker = (() => {
         const res = pending.get(id);
         if (res) { res(hash); pending.delete(id); }
       };
-      /* 런타임 에러 시 워커 비활성화하고 메인스레드 폴백으로 전환 */
-      worker.onerror = () => { workerSupported = false; worker = null; };
-    } catch (_) {
-      /* 보안 컨텍스트(비보안 HTTP)·CSP·하위 브라우저에서 생성 거부 → 영구 폴백 */
-      workerSupported = false; worker = null;
-    }
+      worker.onerror = () => { worker = null; };
+    } catch (_) { worker = null; }
   }
 
-  /** 메인스레드 비차단 해시 (setTimeout으로 이벤트루프 양보) */
-  function _computeMainThreadAsync(file) {
-    return new Promise((resolve) => {
-      setTimeout(() => { resolve(computeFileHash(file)); }, 0);
-    });
-  }
-
-  /** 파일 해시를 워커에서 산출 (미지원/실패 시 메인스레드 비동기 폴백) */
+  /** 파일 해시를 워커에서 산출 (실패 시 메인스레드 폴백) */
   async function compute(file) {
-    /* [2] 삼항 가드: 워커 미지원이면 메인 스레드 비동기 루틴으로 우회 */
-    if (!workerSupported) return _computeMainThreadAsync(file);
     _ensure();
-    if (!worker) return _computeMainThreadAsync(file);
+    if (!worker) return computeFileHash(file);
     try {
       const sample = await file.slice(0, 65536).arrayBuffer();
       return await new Promise((resolve) => {
         const id = ++seq;
         pending.set(id, resolve);
         worker.postMessage({ id, name: file.name, size: file.size, sample }, [sample]);
-        /* 타임아웃 폴백 (워커 응답 지연 시 메인스레드 산출) */
+        /* 타임아웃 폴백 */
         setTimeout(() => { if (pending.has(id)) { pending.delete(id); resolve(computeFileHash(file)); } }, 3000);
       });
-    } catch (_) { return _computeMainThreadAsync(file); }
+    } catch (_) { return computeFileHash(file); }
   }
 
   function destroy() { if (worker) { worker.terminate(); worker = null; } pending.clear(); }
@@ -2462,7 +2472,7 @@ async function importEpubFiles(files) {
   /* [B1] ePub 가드 먼저 */
   const epubReady = await waitForEpubJS();
   if (!epubReady) {
-    Toast.show('epub.js 라이브러리를 로드하지 못했습니다. 페이지를 새로고침해 주세요.', 'error');
+    Toast.show('EPUB 엔진(epub.js/JSZip)을 로드하지 못했습니다. 네트워크 확인 후 새로고침해 주세요.', 'error');
     return;
   }
 
@@ -2510,7 +2520,13 @@ async function importEpubFiles(files) {
     await ErrorBoundary.wrap('renderer', async () => {
       const buf  = await file.arrayBuffer();
       const book = window.ePub(buf.slice(0));
-      await book.ready;
+      /* book.ready 타임아웃 가드 — 멈춤 방지 (JSZip 누락/손상 EPUB 대비) */
+      const ok = await awaitBookReady(book, 12000);
+      if (!ok) {
+        try { book.destroy(); } catch (_) {}
+        Toast.show(`${file.name}: 분석 시간 초과로 건너뜁니다.`, 'error');
+        return;
+      }
 
       let title = file.name.replace(/\.epub$/i, ''), creator = '', publisher = '';
       try {
@@ -3147,56 +3163,26 @@ const AnnotationExporter = (() => {
 
   /* 외부 라이브러리 없이 최소 PDF 1.4 문서를 직접 조립 */
   function _exportPdf(book, anns, safeTitle) {
-    /* [1] PDF 문자열 안전 이스케이프
-       - 역슬래시 → \\  (가장 먼저)
-       - 소괄호 (, ) → \(, \)  (PDF 리터럴 문자열 구분자라 반드시 이스케이프)
-       - 제어문자(개행/탭/캐리지리턴) → 공백/이스케이프 시퀀스
-       - 멀티바이트 유니코드는 PDF 기본 WinAnsi 폰트로 깨질 수 있으므로
-         Latin-1 범위를 벗어난 코드포인트는 '?'로 안전 폴백 */
-    function escapePdfText(str) {
-      let out = '';
-      for (const ch of String(str)) {
-        const code = ch.codePointAt(0);
-        if (ch === '\\') { out += '\\\\'; }
-        else if (ch === '(') { out += '\\('; }
-        else if (ch === ')') { out += '\\)'; }
-        else if (ch === '\r') { out += ' '; }
-        else if (ch === '\n') { out += ' '; }
-        else if (ch === '\t') { out += '  '; }
-        else if (code < 0x20) { out += ' '; }            /* 기타 제어문자 제거 */
-        else if (code > 0xFF) { out += '?'; }            /* WinAnsi 미지원 멀티바이트 폴백 */
-        else { out += ch; }
-      }
-      return out;
-    }
-
-    /* content stream의 바이트 길이를 정확히 구해 /Length 무결성 확보
-       (멀티바이트가 ?로 폴백되므로 사실상 1바이트지만, 안전하게 바이트 측정) */
-    function byteLength(str) {
-      return (typeof TextEncoder !== 'undefined')
-        ? new TextEncoder().encode(str).length
-        : unescape(encodeURIComponent(str)).length;
-    }
-
     const lines = [];
     lines.push(`${book.title || '제목 없음'}`);
     if (book.creator) lines.push(`${book.creator}`);
     lines.push(`Highlights: ${anns.length}`);
     lines.push('');
     anns.forEach((a, i) => {
-      const text = (a.text || '');
-      /* 한 줄 80자 단위로 분할 (이스케이프는 주입 직전에 수행) */
-      const wrapped = text.match(/[\s\S]{1,80}/g) || [text];
+      const text = (a.text || '').replace(/[()\\]/g, ' ');
+      /* 한 줄 80자 단위로 분할 */
+      const wrapped = text.match(/.{1,80}/g) || [text];
       lines.push(`${i + 1}. ${wrapped[0]}`);
       for (let j = 1; j < wrapped.length; j++) lines.push(`   ${wrapped[j]}`);
       if (a.note) lines.push(`   [Note] ${a.note}`);
       lines.push('');
     });
 
-    /* PDF content stream — 각 라인을 이스케이프 후 주입 */
+    /* PDF content stream */
     let stream = 'BT /F1 11 Tf 50 780 Td 14 TL\n';
     lines.forEach(line => {
-      stream += `(${escapePdfText(line)}) Tj T*\n`;
+      const safe = line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+      stream += `(${safe}) Tj T*\n`;
     });
     stream += 'ET';
 
@@ -3204,16 +3190,16 @@ const AnnotationExporter = (() => {
     objects.push('<< /Type /Catalog /Pages 2 0 R >>');
     objects.push('<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
     objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>');
-    objects.push(`<< /Length ${byteLength(stream)} >>\nstream\n${stream}\nendstream`);
-    objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+    objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
 
     let pdf = '%PDF-1.4\n';
     const offsets = [];
     objects.forEach((obj, i) => {
-      offsets.push(byteLength(pdf));
+      offsets.push(pdf.length);
       pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`;
     });
-    const xrefPos = byteLength(pdf);
+    const xrefPos = pdf.length;
     pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
     offsets.forEach(off => { pdf += String(off).padStart(10, '0') + ' 00000 n \n'; });
     pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
@@ -3262,7 +3248,8 @@ const LibraryFullTextSearch = (() => {
     for (const b of books) {
       await ErrorBoundary.wrap('renderer', async () => {
         const book = window.ePub(b.bytes.slice(0));
-        await book.ready;
+        const ok = await awaitBookReady(book, 10000);
+        if (!ok) { try { book.destroy(); } catch (_) {} return; }
         const parser = new DOMParser();
         const items = book.spine?.items || [];
         let bookHits = 0;
@@ -3554,9 +3541,28 @@ const CFICache = (() => {
    §37. 전역 진입점
    ══════════════════════════════════════════════════════════ */
 async function initializeSystemCore() {
-  /* [B1] 최상단 ePub 가드 로그 */
-  if (typeof window.ePub !== 'function') {
-    console.warn('[Fable] ePub 아직 로드되지 않음 — 폴링 가드 활성화');
+  /*
+   * [B1 리팩토링] 비동기 런타임 가드 레이어
+   * ───────────────────────────────────────────────────────────
+   * 과거: epub.js 미로드 시 전역이 throw → initializeSystemCore 전체가
+   *       사멸하여 드롭존·다중등록 리스너까지 먹통이 되는 구조였음.
+   * 변경: 시스템 초기화는 epub.js 로드 여부와 '완전히 분리'하여 항상 기동.
+   *       라이브러리는 백그라운드에서 최대 3초 재시도로 준비하고,
+   *       실제 책을 열 때(openEpubBook/importEpubFiles) 시점에만
+   *       waitForEpubJS()로 가용성을 확인한다.
+   *       → 라이브러리가 늦거나 실패해도 UI/이벤트는 절대 죽지 않음.
+   */
+  if (!isEpubRuntimeReady()) {
+    console.info('[Fable] EPUB 엔진 백그라운드 로드 대기 중… (UI는 정상 기동)');
+    /* 비차단 백그라운드 폴링 — 결과를 store에 반영만 하고 초기화는 막지 않음 */
+    waitForEpubJS(3000).then((ok) => {
+      if (ok) {
+        console.info('[Fable] EPUB 엔진 준비 완료.');
+      } else {
+        console.warn('[Fable] EPUB 엔진(또는 JSZip) 로드 실패 — 책 열기 시 안내됩니다.');
+        Toast.show('EPUB 엔진 로딩이 지연되고 있습니다. 네트워크를 확인해 주세요.', 'info');
+      }
+    });
   }
 
   window.addEventListener('unhandledrejection', (e) => {
@@ -3659,8 +3665,29 @@ function _forceSyncSettingsUI() {
   setTextSafe(DOMProxy.get('leading-val'), String(store.userLeading));
 }
 
+/*
+ * 부트스트랩 — 크래시 격리 레이어
+ * initializeSystemCore 내부에서 예기치 못한 예외가 나도 페이지 전체가
+ * 죽지 않도록 try-catch로 감싸고, 실패 시 사용자에게 안내한다.
+ */
+function _bootstrapFable() {
+  try {
+    const ret = initializeSystemCore();
+    /* async 함수의 reject도 잡아 전역 사멸 방지 */
+    if (ret && typeof ret.catch === 'function') {
+      ret.catch((err) => {
+        console.error('[Fable] 초기화 비동기 오류:', err);
+        try { Toast.show('초기화 중 일부 오류가 발생했습니다.', 'error'); } catch (_) {}
+      });
+    }
+  } catch (err) {
+    console.error('[Fable] 치명적 초기화 오류:', err);
+    try { Toast.show('앱 초기화에 실패했습니다. 새로고침해 주세요.', 'error'); } catch (_) {}
+  }
+}
+
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initializeSystemCore);
+  document.addEventListener('DOMContentLoaded', _bootstrapFable);
 } else {
-  initializeSystemCore();
+  _bootstrapFable();
 }
