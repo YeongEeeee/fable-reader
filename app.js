@@ -1521,13 +1521,16 @@ const NavGuard = (() => {
    §20. locations 백그라운드 생성
    ══════════════════════════════════════════════════════════ */
 function generateLocationsBackground(book) {
-  if (typeof Worker !== 'undefined') {
-    const code = `self.onmessage=function(e){var l=e.data.spineLength||10,list=[];for(var i=0;i<l;i++)list.push("epubcfi(/6/"+(i*2+2)+"[s"+i+"]!/4/2)");self.postMessage({list:list});};`;
-    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-    const w   = new Worker(url);
-    w.postMessage({ spineLength: book.spine?.items?.length || 10 });
-    w.onmessage = (e) => { store.totalLocations = e.data.list.length; URL.revokeObjectURL(url); w.terminate(); };
-    w.onerror   = () => { URL.revokeObjectURL(url); w.terminate(); };
+  /* [2] window.Worker 가용성 + 생성 예외 동시 가드 */
+  if (typeof window !== 'undefined' && typeof window.Worker === 'function') {
+    try {
+      const code = `self.onmessage=function(e){var l=e.data.spineLength||10,list=[];for(var i=0;i<l;i++)list.push("epubcfi(/6/"+(i*2+2)+"[s"+i+"]!/4/2)");self.postMessage({list:list});};`;
+      const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+      const w   = new Worker(url);
+      w.postMessage({ spineLength: book.spine?.items?.length || 10 });
+      w.onmessage = (e) => { store.totalLocations = e.data.list.length; URL.revokeObjectURL(url); w.terminate(); };
+      w.onerror   = () => { URL.revokeObjectURL(url); w.terminate(); };
+    } catch (_) { /* 워커 생성 거부 시 아래 메인스레드 generate로 자연 폴백 */ }
   }
   book.locations.generate(1600).then(l => { store.totalLocations = Math.max(store.totalLocations, l.length); }).catch(() => {});
 }
@@ -1724,10 +1727,12 @@ function computeFileHash(file) {
 const HashWorker = (() => {
   let worker = null;
   let seq = 0;
+  let workerSupported = (typeof window !== 'undefined' && typeof window.Worker === 'function');
   const pending = new Map();
 
   function _ensure() {
-    if (worker) return;
+    /* [2] Web Worker 미지원/생성거부 환경이면 즉시 우회 */
+    if (!workerSupported || worker) return;
     const code = `
       self.onmessage = function(e) {
         var id = e.data.id, name = e.data.name, size = e.data.size, sample = e.data.sample;
@@ -1747,24 +1752,37 @@ const HashWorker = (() => {
         const res = pending.get(id);
         if (res) { res(hash); pending.delete(id); }
       };
-      worker.onerror = () => { worker = null; };
-    } catch (_) { worker = null; }
+      /* 런타임 에러 시 워커 비활성화하고 메인스레드 폴백으로 전환 */
+      worker.onerror = () => { workerSupported = false; worker = null; };
+    } catch (_) {
+      /* 보안 컨텍스트(비보안 HTTP)·CSP·하위 브라우저에서 생성 거부 → 영구 폴백 */
+      workerSupported = false; worker = null;
+    }
   }
 
-  /** 파일 해시를 워커에서 산출 (실패 시 메인스레드 폴백) */
+  /** 메인스레드 비차단 해시 (setTimeout으로 이벤트루프 양보) */
+  function _computeMainThreadAsync(file) {
+    return new Promise((resolve) => {
+      setTimeout(() => { resolve(computeFileHash(file)); }, 0);
+    });
+  }
+
+  /** 파일 해시를 워커에서 산출 (미지원/실패 시 메인스레드 비동기 폴백) */
   async function compute(file) {
+    /* [2] 삼항 가드: 워커 미지원이면 메인 스레드 비동기 루틴으로 우회 */
+    if (!workerSupported) return _computeMainThreadAsync(file);
     _ensure();
-    if (!worker) return computeFileHash(file);
+    if (!worker) return _computeMainThreadAsync(file);
     try {
       const sample = await file.slice(0, 65536).arrayBuffer();
       return await new Promise((resolve) => {
         const id = ++seq;
         pending.set(id, resolve);
         worker.postMessage({ id, name: file.name, size: file.size, sample }, [sample]);
-        /* 타임아웃 폴백 */
+        /* 타임아웃 폴백 (워커 응답 지연 시 메인스레드 산출) */
         setTimeout(() => { if (pending.has(id)) { pending.delete(id); resolve(computeFileHash(file)); } }, 3000);
       });
-    } catch (_) { return computeFileHash(file); }
+    } catch (_) { return _computeMainThreadAsync(file); }
   }
 
   function destroy() { if (worker) { worker.terminate(); worker = null; } pending.clear(); }
@@ -3129,26 +3147,56 @@ const AnnotationExporter = (() => {
 
   /* 외부 라이브러리 없이 최소 PDF 1.4 문서를 직접 조립 */
   function _exportPdf(book, anns, safeTitle) {
+    /* [1] PDF 문자열 안전 이스케이프
+       - 역슬래시 → \\  (가장 먼저)
+       - 소괄호 (, ) → \(, \)  (PDF 리터럴 문자열 구분자라 반드시 이스케이프)
+       - 제어문자(개행/탭/캐리지리턴) → 공백/이스케이프 시퀀스
+       - 멀티바이트 유니코드는 PDF 기본 WinAnsi 폰트로 깨질 수 있으므로
+         Latin-1 범위를 벗어난 코드포인트는 '?'로 안전 폴백 */
+    function escapePdfText(str) {
+      let out = '';
+      for (const ch of String(str)) {
+        const code = ch.codePointAt(0);
+        if (ch === '\\') { out += '\\\\'; }
+        else if (ch === '(') { out += '\\('; }
+        else if (ch === ')') { out += '\\)'; }
+        else if (ch === '\r') { out += ' '; }
+        else if (ch === '\n') { out += ' '; }
+        else if (ch === '\t') { out += '  '; }
+        else if (code < 0x20) { out += ' '; }            /* 기타 제어문자 제거 */
+        else if (code > 0xFF) { out += '?'; }            /* WinAnsi 미지원 멀티바이트 폴백 */
+        else { out += ch; }
+      }
+      return out;
+    }
+
+    /* content stream의 바이트 길이를 정확히 구해 /Length 무결성 확보
+       (멀티바이트가 ?로 폴백되므로 사실상 1바이트지만, 안전하게 바이트 측정) */
+    function byteLength(str) {
+      return (typeof TextEncoder !== 'undefined')
+        ? new TextEncoder().encode(str).length
+        : unescape(encodeURIComponent(str)).length;
+    }
+
     const lines = [];
     lines.push(`${book.title || '제목 없음'}`);
     if (book.creator) lines.push(`${book.creator}`);
     lines.push(`Highlights: ${anns.length}`);
     lines.push('');
     anns.forEach((a, i) => {
-      const text = (a.text || '').replace(/[()\\]/g, ' ');
-      /* 한 줄 80자 단위로 분할 */
-      const wrapped = text.match(/.{1,80}/g) || [text];
+      const text = (a.text || '');
+      /* 한 줄 80자 단위로 분할 (이스케이프는 주입 직전에 수행) */
+      const wrapped = text.match(/[\s\S]{1,80}/g) || [text];
       lines.push(`${i + 1}. ${wrapped[0]}`);
       for (let j = 1; j < wrapped.length; j++) lines.push(`   ${wrapped[j]}`);
       if (a.note) lines.push(`   [Note] ${a.note}`);
       lines.push('');
     });
 
-    /* PDF content stream */
+    /* PDF content stream — 각 라인을 이스케이프 후 주입 */
     let stream = 'BT /F1 11 Tf 50 780 Td 14 TL\n';
     lines.forEach(line => {
-      const safe = line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
-      stream += `(${safe}) Tj T*\n`;
+      stream += `(${escapePdfText(line)}) Tj T*\n`;
     });
     stream += 'ET';
 
@@ -3156,16 +3204,16 @@ const AnnotationExporter = (() => {
     objects.push('<< /Type /Catalog /Pages 2 0 R >>');
     objects.push('<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
     objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>');
-    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
-    objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+    objects.push(`<< /Length ${byteLength(stream)} >>\nstream\n${stream}\nendstream`);
+    objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
 
     let pdf = '%PDF-1.4\n';
     const offsets = [];
     objects.forEach((obj, i) => {
-      offsets.push(pdf.length);
+      offsets.push(byteLength(pdf));
       pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`;
     });
-    const xrefPos = pdf.length;
+    const xrefPos = byteLength(pdf);
     pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
     offsets.forEach(off => { pdf += String(off).padStart(10, '0') + ' 00000 n \n'; });
     pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
