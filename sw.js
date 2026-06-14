@@ -4,7 +4,7 @@
  */
 'use strict';
 
-const CACHE_VERSION = 'fable-v3-cache-v3';
+const CACHE_VERSION = 'fable-v6-cache-v1';
 const FONT_CACHE    = 'fable-v3-fonts-v1';
 const SYNC_TAG      = 'fable-annotation-sync';
 
@@ -51,6 +51,12 @@ self.addEventListener('fetch', (e) => {
       url.includes('api.dictionary') ||
       e.request.method !== 'GET') return;
 
+  /* [2]-7 Range 요청(대용량 EPUB/이미지 스트리밍): 부분 응답을 쪼개어 전달해 OOM 방지 */
+  if (e.request.headers.has('range')) {
+    e.respondWith(handleRangeRequest(e.request));
+    return;
+  }
+
   /* 폰트: Stale-While-Revalidate */
   if (FONT_ORIGINS.some(o => url.startsWith(o))) {
     e.respondWith(
@@ -82,6 +88,38 @@ self.addEventListener('fetch', (e) => {
     })
   );
 });
+
+/**
+ * [2]-7 Range 요청 처리 — 캐시된 자원을 바이트 범위로 분할 스트리밍
+ * 대용량 자원을 통째로 메모리에 올리지 않고 요청된 청크만 206으로 응답
+ */
+async function handleRangeRequest(request) {
+  const rangeHeader = request.headers.get('range');
+  let cached = await caches.match(request.url);
+  if (!cached) {
+    try { cached = await fetch(request.url); } catch (_) { return new Response(null, { status: 502 }); }
+  }
+  if (!cached || !cached.ok) return cached || new Response(null, { status: 416 });
+
+  const buf = await cached.arrayBuffer();
+  const total = buf.byteLength;
+  const m = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
+  if (!m) return new Response(buf, { status: 200 });
+
+  const start = parseInt(m[1], 10);
+  const end   = m[2] ? Math.min(parseInt(m[2], 10), total - 1) : total - 1;
+  if (start >= total) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${total}` } });
+
+  const chunk = buf.slice(start, end + 1);
+  return new Response(chunk, {
+    status: 206,
+    headers: {
+      'Content-Range':  `bytes ${start}-${end}/${total}`,
+      'Accept-Ranges':  'bytes',
+      'Content-Length': String(chunk.byteLength),
+    },
+  });
+}
 
 /* ── message ── */
 self.addEventListener('message', (e) => {

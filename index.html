@@ -51,8 +51,18 @@
         <span class="topbar-title">Fable</span>
       </div>
       <div class="topbar-actions">
+        <!-- 서재 즉시 검색 (제목/저자) -->
+        <input type="search" id="library-search-input" class="library-search-input"
+               placeholder="제목·저자 검색" autocomplete="off" aria-label="서재 도서 검색">
         <!-- 다중 파일 선택 input (multiple 속성) -->
         <input type="file" id="file-input" accept=".epub" multiple style="display:none;" aria-hidden="true">
+        <button type="button" class="topbar-btn" id="btn-fts-open"
+                aria-label="전체 본문 검색" title="모든 도서 본문에서 검색">🔎</button>
+        <button type="button" class="topbar-btn" id="btn-cloud-backup"
+                aria-label="서재 백업" title="서재 전체 백업 파일 저장">☁</button>
+        <label class="topbar-btn" id="btn-restore-label" title="백업 파일에서 복원">
+          ⤓<input type="file" id="restore-file-input" accept=".json" style="display:none;" aria-label="백업 파일 복원">
+        </label>
         <button type="button" class="topbar-btn topbar-btn--primary" id="btn-file-select"
                 aria-label="도서 추가 — EPUB 파일 선택">
           <span aria-hidden="true">📂</span> 도서 추가
@@ -65,7 +75,10 @@
     </header>
 
     <!-- ══ 서재 본문 영역 ══ -->
-    <div class="library-body">
+    <div class="library-body" id="library-body">
+
+      <!-- [1]-4 독서 분석 대시보드 -->
+      <section id="dashboard-section" class="dashboard-section" aria-label="독서 분석 대시보드"></section>
 
       <!-- [요구2-최상단] 최근 읽은 책 -->
       <section id="recent-section" class="recent-section" style="display:none;" aria-label="최근 읽은 책">
@@ -77,6 +90,12 @@
       <section class="folder-section" aria-label="내 폴더">
         <h2 class="library-section-title">내 폴더</h2>
         <div id="folder-bar" class="folder-bar" role="tablist" aria-label="폴더 필터"></div>
+      </section>
+
+      <!-- [1]-6 스마트 태그 + 정렬 -->
+      <section class="tag-section" aria-label="태그 필터 및 정렬">
+        <h2 class="library-section-title">태그 · 정렬</h2>
+        <div id="tag-bar" class="tag-bar" role="group" aria-label="태그 필터"></div>
       </section>
 
       <!-- 서재 타이틀 -->
@@ -138,6 +157,7 @@
       <div class="nav-right">
         <button class="nav-action-btn" id="btn-search-toggle" aria-label="전문 검색" aria-haspopup="dialog">🔍</button>
         <button class="nav-action-btn" id="btn-annotation-toggle" aria-label="TTS 낭독">✏️</button>
+        <button class="nav-action-btn" id="btn-pomodoro-open" aria-label="포모도로 타이머" title="집중 독서 타이머">🍅</button>
         <button class="nav-action-btn" id="btn-stats-toggle" aria-label="독서 통계" aria-haspopup="dialog">📊</button>
         <button class="nav-action-btn" id="btn-settings-toggle"
                 aria-label="독서 설정" aria-expanded="false" aria-controls="settings-panel">⚙ 설정</button>
@@ -163,6 +183,11 @@
         <input type="range" id="progress-range-slider" class="progress-range-slider"
                min="0" max="100" value="0" step="1"
                aria-label="읽기 위치 퍼센트 이동" title="드래그하여 위치 이동">
+        <!-- [3]-2 슬라이더 실시간 플로팅 툴팁 (챕터 + 퍼센트) -->
+        <div id="slider-tooltip" class="slider-tooltip" style="display:none;" aria-hidden="true">
+          <span id="slider-tooltip-chapter" class="slider-tooltip-chapter"></span>
+          <span id="slider-tooltip-pct" class="slider-tooltip-pct"></span>
+        </div>
       </div>
       <span id="reading-location-range" aria-live="polite">- / -</span>
     </footer>
@@ -310,6 +335,17 @@
     </div>
     <div class="settings-divider"></div>
 
+    <div class="settings-divider"></div>
+
+    <!-- [2]-2 서체 선택 (선택 시점 lazy load) -->
+    <div class="settings-row" role="group" aria-label="본문 서체">
+      <span class="settings-label">본문 서체</span>
+      <div class="settings-control">
+        <select id="font-family-select" class="font-family-select" aria-label="본문 서체 선택"></select>
+      </div>
+    </div>
+    <div class="settings-divider"></div>
+
     <div class="settings-row settings-row--column">
       <span class="settings-label">사용자 폰트 업로드</span>
       <input type="file" id="font-uploader" accept=".ttf,.otf,.woff,.woff2" style="font-size:11px;" aria-label="커스텀 폰트 파일">
@@ -384,6 +420,96 @@
 <div id="import-progress-bar" class="import-progress-bar" style="display:none;" role="status" aria-live="polite">
   <div class="import-progress-fill" id="import-progress-fill"></div>
   <span id="import-progress-text" class="import-progress-text">도서 추가 중...</span>
+</div>
+
+<!-- ══ [1]-11 메타데이터 편집 모달 ══ -->
+<div id="metadata-modal" class="modal-overlay" style="display:none;"
+     role="dialog" aria-modal="true" aria-labelledby="metadata-modal-title">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 id="metadata-modal-title">✏️ 도서 정보 편집</h3>
+      <button class="modal-close-btn" id="btn-meta-edit-close" aria-label="편집 창 닫기">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="meta-edit-cover-row">
+        <img id="meta-edit-cover-preview" class="meta-edit-cover-preview" alt="표지 미리보기" style="display:none;">
+        <label class="meta-edit-cover-btn">
+          표지 변경
+          <input type="file" id="meta-edit-cover-input" accept="image/*" style="display:none;" aria-label="표지 이미지 재업로드">
+        </label>
+      </div>
+      <label class="meta-edit-field">
+        <span>제목</span>
+        <input type="text" id="meta-edit-title" aria-label="제목">
+      </label>
+      <label class="meta-edit-field">
+        <span>저자</span>
+        <input type="text" id="meta-edit-creator" aria-label="저자">
+      </label>
+      <label class="meta-edit-field">
+        <span>출판사</span>
+        <input type="text" id="meta-edit-publisher" aria-label="출판사">
+      </label>
+      <button id="btn-meta-edit-save" class="modal-primary-btn">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ [1]-7 메모 내보내기 모달 ══ -->
+<div id="export-modal" class="modal-overlay" style="display:none;"
+     role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 id="export-modal-title">📤 하이라이트·메모 내보내기</h3>
+      <button class="modal-close-btn" id="btn-export-close" aria-label="내보내기 창 닫기">✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="export-modal-info" class="export-info"></p>
+      <div class="export-format-row">
+        <button id="btn-export-md" class="export-format-btn">
+          <span class="export-format-icon">📝</span><span>Markdown</span>
+        </button>
+        <button id="btn-export-json" class="export-format-btn">
+          <span class="export-format-icon">🗂</span><span>JSON</span>
+        </button>
+        <button id="btn-export-pdf" class="export-format-btn">
+          <span class="export-format-icon">📄</span><span>PDF</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ [1]-5 풀텍스트 서재 검색 모달 ══ -->
+<div id="fts-modal" class="modal-overlay" style="display:none;"
+     role="dialog" aria-modal="true" aria-labelledby="fts-modal-title">
+  <div class="modal-box modal-box--large">
+    <div class="modal-header">
+      <h3 id="fts-modal-title">🔎 전체 서재 본문 검색</h3>
+      <button class="modal-close-btn" id="btn-fts-close" aria-label="검색 창 닫기">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="search-input-row" role="search">
+        <input type="search" id="fts-input" placeholder="모든 도서 본문에서 검색 (2글자 이상)" autocomplete="off" aria-label="전체 본문 검색어">
+        <button id="btn-fts-run" class="ctrl-btn" aria-label="검색 실행">검색</button>
+      </div>
+      <div id="fts-results" class="fts-results" role="listbox" aria-live="polite"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ [1]-12 포모도로 타이머 팝업 ══ -->
+<div id="pomodoro-popup" class="pomodoro-popup" style="display:none;" data-mode="idle"
+     role="dialog" aria-label="포모도로 독서 타이머">
+  <div class="pomodoro-head">
+    <span class="pomodoro-mode-badge" id="pomodoro-mode">대기</span>
+    <button class="pomodoro-close" id="btn-pomodoro-close" aria-label="타이머 닫기">✕</button>
+  </div>
+  <div class="pomodoro-time" id="pomodoro-time">25:00</div>
+  <div class="pomodoro-controls">
+    <button class="ctrl-btn" id="btn-pomodoro-toggle" aria-label="시작/일시정지">▶</button>
+    <button class="ctrl-btn" id="btn-pomodoro-reset" aria-label="초기화">↺</button>
+  </div>
 </div>
 
 <script src="./app.js" defer></script>
