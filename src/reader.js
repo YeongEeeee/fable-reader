@@ -32,6 +32,34 @@ import {
 } from './store.js';
 import { StorageSystem } from './database.js';
 
+/*
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │ EPUB 엔진 정적 import (Vite 번들러가 항상 경로를 재작성)      │
+ * │                                                             │
+ * │ ⚠️ 과거 버그: ensureEpubRuntime()에서 `await import('jszip')`│
+ * │   처럼 '베어 스펙(bare specifier)'을 동적 import 하면, 빌드   │
+ * │   산출물이 아닌 원본 src가 노출되거나 번들 해석이 어긋난      │
+ * │   환경(Cloudflare 정적 배포 등)에서                          │
+ * │   "Failed to resolve module specifier 'jszip'" 로 크래시.    │
+ * │                                                             │
+ * │ ✅ 해결: 정적 import로 전환. Vite는 정적 import 경로를 빌드   │
+ * │   시 100% 실제 청크 경로로 재작성하므로 베어 스펙 해석 실패가 │
+ * │   원천 차단된다. epub.js(UMD)는 평가 시점에 window.JSZip을    │
+ * │   읽으므로, JSZip 전역을 epubjs 평가 이전에 주입해야 한다.    │
+ * │   → 본 파일 상단에서 jszip을 먼저 import·전역 주입한 뒤        │
+ * │     epubjs를 import 한다 (모듈 평가 순서 = import 선언 순서). │
+ * └─────────────────────────────────────────────────────────────┘
+ */
+import JSZipLib from 'jszip';
+/* epubjs 평가 이전에 JSZip 전역을 확정 주입 (UMD 의존성 체인 보존) */
+if (typeof window !== 'undefined' && typeof window.JSZip !== 'function' && JSZipLib) {
+  window.JSZip = JSZipLib.default || JSZipLib;
+}
+import ePubLib from 'epubjs';
+if (typeof window !== 'undefined' && typeof window.ePub !== 'function' && ePubLib) {
+  window.ePub = ePubLib.default || ePubLib;
+}
+
 /* ══════════════════════════════════════════════════════════
    의존성 주입 레지스트리 (순환 import 차단)
    ══════════════════════════════════════════════════════════ */
@@ -53,21 +81,48 @@ export function registerReaderDeps(overrides) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   epub.js 런타임 부트 (ESM 동적 import → 전역 주입)
+   epub.js 런타임 부트 — 전역 주입 확인 + CDN 폴백
    ══════════════════════════════════════════════════════════ */
 let _epubRuntimePromise = null;
+
+/* 마지막 안전망: 정적 import가 어떤 이유로든 전역을 주입하지 못한
+   극단적 환경에서, CDN UMD 스크립트를 주입해 window 전역을 복구한다. */
+function _loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('script load failed: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function _cdnFallback() {
+  /* JSZip → epub.js 순서 보장 (UMD 의존성) */
+  if (typeof window.JSZip !== 'function') {
+    try { await _loadScript('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'); }
+    catch (_) { try { await _loadScript('https://unpkg.com/jszip@3.10.1/dist/jszip.min.js'); } catch (_) {} }
+  }
+  if (typeof window.ePub !== 'function') {
+    try { await _loadScript('https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js'); }
+    catch (_) { try { await _loadScript('https://unpkg.com/epubjs@0.3.93/dist/epub.min.js'); } catch (_) {} }
+  }
+}
 
 export function ensureEpubRuntime() {
   if (_epubRuntimePromise) return _epubRuntimePromise;
   _epubRuntimePromise = (async () => {
     try {
-      if (typeof window.JSZip !== 'function') {
-        const JSZipMod = await import('jszip');
-        window.JSZip = JSZipMod.default || JSZipMod;
+      /* 1차: 정적 import가 이미 전역을 주입했는지 확인 */
+      if (typeof window.JSZip !== 'function' && JSZipLib) {
+        window.JSZip = JSZipLib.default || JSZipLib;
       }
-      if (typeof window.ePub !== 'function') {
-        const ePubMod = await import('epubjs');
-        window.ePub = ePubMod.default || ePubMod;
+      if (typeof window.ePub !== 'function' && ePubLib) {
+        window.ePub = ePubLib.default || ePubLib;
+      }
+      /* 2차: 그래도 비어 있으면 CDN UMD 폴백 (모듈 해석 실패 환경 복구) */
+      if (!isEpubRuntimeReady()) {
+        await _cdnFallback();
       }
       return isEpubRuntimeReady();
     } catch (err) {

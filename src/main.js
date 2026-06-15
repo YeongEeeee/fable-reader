@@ -44,6 +44,21 @@ import {
 } from './ui/settings.js';
 
 /* ══════════════════════════════════════════════════════════
+   환경 변수 Null-Safe 접근
+   import.meta / import.meta.env 가 undefined인 컨텍스트에서도
+   절대 throw 하지 않고 모드 문자열을 안전하게 반환한다.
+   (기본값 'production' — 빌드 산출물 기준 안전측)
+   ══════════════════════════════════════════════════════════ */
+function _envMode() {
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta && import.meta.env && import.meta.env.MODE) {
+      return import.meta.env.MODE;
+    }
+  } catch (_) { /* import.meta 자체가 없는 환경 — 무시하고 폴백 */ }
+  return 'production';
+}
+
+/* ══════════════════════════════════════════════════════════
    순환 의존성 차단 — reader.js에 UI 콜백 주입
    ══════════════════════════════════════════════════════════ */
 registerReaderDeps({
@@ -392,10 +407,19 @@ async function initializeSystemCore() {
   /* PWA 서비스 워커 등록 (vite-plugin-pwa injectManifest 산출물) */
   if ('serviceWorker' in navigator) {
     try {
-      const reg = await navigator.serviceWorker.register(
-        import.meta.env.MODE === 'production' ? './sw.js' : './dev-sw.js?dev-sw',
-        { type: import.meta.env.MODE === 'production' ? 'classic' : 'module' }
-      );
+      /*
+       * [버그 수정] import.meta.env.MODE 직접 접근 금지.
+       * ───────────────────────────────────────────────────────
+       * import.meta 또는 import.meta.env 가 undefined인 컨텍스트에서
+       * .MODE 를 읽으면 "Cannot read properties of undefined (reading 'MODE')"
+       * 로 크래시가 나면서 SW 등록은 물론 그 아래 초기화까지 사멸한다.
+       * → _envMode() Null-Safe 가드로 안전하게 읽고, 프로덕션 빌드에서는
+       *   항상 단일 './sw.js'(injectManifest 산출물)를 등록한다.
+       */
+      const isProd = _envMode() === 'production';
+      const swUrl  = isProd ? './sw.js' : './dev-sw.js?dev-sw';
+      const swType = isProd ? 'classic' : 'module';
+      const reg = await navigator.serviceWorker.register(swUrl, { type: swType });
       console.log('[Fable] SW 등록 완료:', reg.scope);
       reg.addEventListener('updatefound', () => {
         const nw = reg.installing;
