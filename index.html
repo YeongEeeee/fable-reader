@@ -3,15 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Fable v3 — Premium EPUB Reader</title>
+  <title>Fable Premium — Modular EPUB Reader</title>
 
-  <!-- FOUC 차단: 저장된 테마를 즉시 body에 적용 -->
+  <!-- ════════════════════════════════════════════════════════════
+       FOUC 차단 가드 (존치)
+       저장된 테마를 모듈 번들 로드 이전에 즉시 document에 주입하여
+       초기 렌더링 시 테마 미적용 반짝임을 방지한다.
+       ════════════════════════════════════════════════════════════ -->
   <script>
     (function(){
       try {
-        const s = localStorage.getItem('fable_v3_state');
+        var s = localStorage.getItem('fable_v3_state');
         if (s) {
-          const p = JSON.parse(s);
+          var p = JSON.parse(s);
           if (p.theme && p.theme !== 'paper') document.documentElement.setAttribute('data-theme', p.theme);
           if (p.userBg)  document.documentElement.style.setProperty('--color-user-bg',  p.userBg);
           if (p.userInk) document.documentElement.style.setProperty('--color-user-ink', p.userInk);
@@ -26,35 +30,17 @@
 
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#fcfbf7">
-  <link rel="stylesheet" href="./style.css">
+
+  <!-- 스타일: Vite가 번들링하는 모듈 자산 -->
+  <link rel="stylesheet" href="/src/assets/style.css">
 
   <!--
-    ┌─────────────────────────────────────────────────────────────┐
-    │ EPUB 엔진 의존성 로드 (순서 중요!)                          │
-    │                                                             │
-    │ epub.js 0.3.93은 UMD 빌드로, 내부에서 전역 window.JSZip을     │
-    │ 요구합니다(t.ePub = e(t.JSZip)). JSZip이 먼저 로드되지        │
-    │ 않으면 EPUB(ZIP) 압축 해제가 실패하여, 특히 다중 파일         │
-    │ 등록 시 멈춤(Freezing) 현상이 발생합니다.                    │
-    │                                                             │
-    │ 따라서 ① JSZip → ② epub.js 순서로 로드하며,                  │
-    │ cdnjs 404 회피를 위해 npm 미러(jsDelivr)를 1차로 사용하고     │
-    │ onerror 시 unpkg로 폴백하는 체인을 구성합니다.               │
-    └─────────────────────────────────────────────────────────────┘
+    ⚠️ epub.js / JSZip CDN <script> 태그는 제거되었습니다.
+    Vite ESM 환경에서는 reader.js의 ensureEpubRuntime()이
+    'jszip' · 'epubjs'를 동적 import 하여 window 전역에 주입합니다.
+    (UMD 인터롭: t.ePub = e(t.JSZip) 의존성 체인 보존)
   -->
-  <!-- ① JSZip (epub.js 필수 선행 의존성) -->
-  <script
-    src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"
-    onerror="this.onerror=null;this.remove();var s=document.createElement('script');s.src='https://unpkg.com/jszip@3.10.1/dist/jszip.min.js';document.head.appendChild(s);"
-  ></script>
-
-  <!-- ② epub.js 0.3.93 (npm 미러 → 폴백 체인) -->
-  <script
-    src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"
-    onerror="this.onerror=null;this.remove();var s=document.createElement('script');s.src='https://unpkg.com/epubjs@0.3.93/dist/epub.min.js';s.onerror=function(){this.onerror=null;this.remove();var s2=document.createElement('script');s2.src='https://cdnjs.cloudflare.com/ajax/libs/epubjs/0.3.93/epub.min.js';document.head.appendChild(s2);};document.head.appendChild(s);"
-  ></script>
 </head>
-<body>
 
 <div id="app">
 
@@ -535,6 +521,8 @@
   </div>
 </div>
 
-<script src="./app.js" defer></script>
+
+<!-- 모놀리식 스크립트 결합 폐기 → 단일 ES Module 진입점 -->
+<script type="module" src="/src/main.js"></script>
 </body>
 </html>

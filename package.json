@@ -1,0 +1,25 @@
+{
+  "name": "fable-premium",
+  "version": "3.1.0",
+  "private": true,
+  "description": "Fable Premium — 순수 바닐라 JS 기반 모듈러 EPUB 리더 (Vite + ES Modules)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "serve": "vite preview --host"
+  },
+  "dependencies": {
+    "epubjs": "0.3.93",
+    "jszip": "3.10.1"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "vite-plugin-pwa": "^0.20.5"
+  },
+  "browserslist": [
+    "defaults",
+    "not IE 11"
+  ]
+}

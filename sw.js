@@ -1,32 +1,28 @@
 /**
- * Fable v3 — Service Worker (안정화 리팩토링)
+ * src/sw.js — Fable Premium 서비스 워커 (Vite injectManifest 대응)
  * ───────────────────────────────────────────────────────────────
- * 핵심 수정:
- *  1) install 단계에서 cache.addAll() 사용 금지.
- *     addAll은 목록 중 '단 하나라도' 실패하면 전체가 reject되어
- *     SW 설치 자체가 실패 → 정적 자원까지 캐시 안 됨 → 연쇄 404.
- *     따라서 자원별 개별 cache.add()로 처리하고 각각 catch하여
- *     CDN 1건 실패가 앱셸 전체를 무너뜨리지 않도록 격리한다.
- *  2) 외부 CDN(epub.js/JSZip)은 'best-effort'로 분리.
- *     설치 시 실패해도 무시하고, fetch 시 network-first로 처리하여
- *     잘못 캐시된 404 응답이 영구 고착되는 것을 방지한다.
- *  3) 로컬 동일 출처 자원만 cache-first, 그 외/CDN은 network-first.
+ * vite-plugin-pwa(injectManifest)가 self.__WB_MANIFEST에 빌드 산출물
+ * 프리캐시 목록을 주입한다. 그 목록을 로컬 앱셸 캐시에 개별 등록하고,
+ * 기존에 안정화한 네트워크 전략(개별 캐싱 / CDN network-first /
+ * 폰트 SWR / Range 스트리밍)을 그대로 유지한다.
+ *
+ * 핵심 안정화 스펙 보존:
+ *   - addAll 금지 → 개별 cache.put (1건 실패가 전체 설치를 막지 않음)
+ *   - CDN(epub.js/JSZip) network-first + 별도 캐시 (404 고착 방지)
+ *   - 로컬 자원 cache-first, 네비게이션 오프라인 폴백
+ *   - 대용량 EPUB Range 206 스트리밍
+ *   - LWW 백그라운드 동기화 메시지/Background Sync
  * ─────────────────────────────────────────────────────────────── */
+
 'use strict';
 
-const CACHE_VERSION = 'fable-v6-cache-v2';   /* 캐시 무효화를 위해 버전 상향 */
-const FONT_CACHE    = 'fable-v3-fonts-v1';
-const CDN_CACHE     = 'fable-v6-cdn-v1';     /* CDN 자원 전용 캐시 (앱셸과 분리) */
-const SYNC_TAG      = 'fable-annotation-sync';
+/* injectManifest 주입 지점 — 빌드 시 프리캐시 매니페스트가 삽입됨 */
+const PRECACHE_MANIFEST = self.__WB_MANIFEST || [];
 
-/* 반드시 캐시되어야 하는 '동일 출처' 핵심 앱셸 (실패 시에도 개별 격리) */
-const LOCAL_SHELL = [
-  './',
-  './index.html',
-  './style.css',
-  './app.js',
-  './manifest.json',
-];
+const CACHE_VERSION = 'fable-v6-cache-v2';
+const FONT_CACHE    = 'fable-v3-fonts-v1';
+const CDN_CACHE     = 'fable-v6-cdn-v1';
+const SYNC_TAG      = 'fable-annotation-sync';
 
 /* best-effort 외부 CDN 자원 (설치 실패해도 앱 기동에 영향 없음) */
 const CDN_ASSETS = [
@@ -50,25 +46,20 @@ self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
     const cache = await caches.open(CACHE_VERSION);
 
-    /* 로컬 앱셸: 개별 add + 개별 catch (1건 실패가 전체를 막지 않음) */
-    await Promise.all(LOCAL_SHELL.map(async (url) => {
-      try {
-        await cache.add(new Request(url, { cache: 'reload' }));
-      } catch (err) {
-        console.warn('[SW] 로컬 앱셸 캐시 실패(무시):', url, err.message);
-      }
+    /* Vite 프리캐시 매니페스트(로컬 빌드 산출물) 개별 등록 */
+    const urls = PRECACHE_MANIFEST.map(entry => (typeof entry === 'string' ? entry : entry.url));
+    await Promise.all(urls.map(async (url) => {
+      try { await cache.add(new Request(url, { cache: 'reload' })); }
+      catch (err) { console.warn('[SW] 로컬 앱셸 캐시 실패(무시):', url, err.message); }
     }));
 
     /* CDN 자원: best-effort. 실패해도 설치를 막지 않음 */
     const cdnCache = await caches.open(CDN_CACHE);
     await Promise.all(CDN_ASSETS.map(async (url) => {
       try {
-        /* no-cors라도 응답을 받으면 캐시 시도 (opaque 허용) */
         const res = await fetch(url, { mode: 'cors' }).catch(() => fetch(url, { mode: 'no-cors' }));
         if (res && (res.ok || res.type === 'opaque')) await cdnCache.put(url, res.clone());
-      } catch (err) {
-        console.warn('[SW] CDN 자원 선캐시 실패(무시):', url, err.message);
-      }
+      } catch (err) { console.warn('[SW] CDN 자원 선캐시 실패(무시):', url, err.message); }
     }));
 
     await self.skipWaiting();
@@ -90,7 +81,6 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = req.url;
 
-  /* 비-GET, 확장 프로그램, 비대상 요청은 SW가 손대지 않음 */
   if (req.method !== 'GET' || url.startsWith('chrome-extension') || url.includes('api.dictionary')) return;
 
   /* Range 요청(대용량 EPUB/이미지): 부분 스트리밍 */
@@ -105,9 +95,7 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  /* CDN(epub.js/JSZip 등): network-first.
-     잘못 캐시된 404가 고착되지 않도록 항상 네트워크를 먼저 시도하고,
-     실패 시에만 캐시 폴백. 200/opaque 응답만 캐시에 갱신. */
+  /* CDN(epub.js/JSZip 등): network-first (404 고착 방지) */
   if (CDN_ORIGINS.some(o => url.startsWith(o))) {
     e.respondWith(networkFirstCDN(req));
     return;
@@ -133,19 +121,15 @@ async function networkFirstCDN(req) {
   const cache = await caches.open(CDN_CACHE);
   try {
     const res = await fetch(req);
-    /* 200 또는 opaque(no-cors)만 캐시 갱신. 404/5xx는 캐시에 넣지 않음 */
     if (res && (res.ok || res.type === 'opaque')) {
       cache.put(req, res.clone()).catch(() => {});
       return res;
     }
-    /* 비정상 응답이면 캐시 폴백 시도 */
     const cached = await cache.match(req);
     return cached || res;
   } catch (_) {
-    /* 네트워크 실패 → 캐시 폴백 */
     const cached = await cache.match(req);
     if (cached) return cached;
-    /* 폴백도 없으면 명확한 503 (앱은 자체 CDN 폴백 체인으로 재시도) */
     return new Response('', { status: 503, statusText: 'CDN unavailable' });
   }
 }
@@ -155,16 +139,14 @@ async function cacheFirstLocal(req) {
   if (cached) return cached;
   try {
     const res = await fetch(req);
-    /* 동일 출처 정상 응답만 캐시 */
     if (res && res.status === 200 && res.type === 'basic') {
       const clone = res.clone();
       caches.open(CACHE_VERSION).then(c => c.put(req, clone)).catch(() => {});
     }
     return res;
   } catch (_) {
-    /* 내비게이션 요청 실패 시 앱셸로 폴백 (오프라인 SPA 보장) */
     if (req.mode === 'navigate') {
-      const shell = await caches.match('./index.html');
+      const shell = await caches.match('./index.html') || await caches.match('index.html');
       if (shell) return shell;
     }
     return new Response('', { status: 504, statusText: 'Offline' });
