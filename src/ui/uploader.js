@@ -776,20 +776,15 @@ async function importEpubFiles(files) {
   const fileArr = Array.from(files);
   const total   = fileArr.length;
 
-  if (total === 1) {
-    /* [보완] 단일 파일도 중복 체크 */
-    const hash = await HashWorker.compute(fileArr[0]);
-    const dup  = await StorageSystem.findBookByHash(hash);
-    if (dup) {
-      Toast.show(`이미 서재에 있는 도서입니다: ${truncateTitle(dup.title)}`, 'info');
-      await openEpubBook(dup.bytes, true);
-      return;
-    }
-    await openEpubBook(fileArr[0], false);
-    return;
-  }
-
-  /* 다중 파일: 메타/표지를 모은 뒤 [2]-3 단일 배치 트랜잭션으로 일괄 커밋 */
+  /*
+   * [버그1 수정] 파일 등록 = 서재 추가 전용 동선.
+   * ───────────────────────────────────────────────────────────
+   * 과거: 단일 파일 업로드 시 openEpubBook()을 호출해 저장과 동시에
+   *       뷰어로 강제 진입했음(동선 오류).
+   * 변경: 단일/다중 구분 없이 '메타·표지 추출 → 서재 저장 → 갱신'만
+   *       수행하고, 뷰어 진입은 절대 하지 않는다.
+   *       (실제 책 열기는 서재 그리드에서 카드 클릭 시에만 발생)
+   */
   ImportProgress.show(`0 / ${total} 도서 추가 중...`);
   let successCount = 0, dupCount = 0;
   const batch = []; /* { bookKey, buffer, title, creator, coverDataUrl, fileHash, publisher } */

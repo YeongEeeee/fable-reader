@@ -26,7 +26,7 @@ import { AnnotationSyncEngine } from './sync.js';
 import {
   registerReaderDeps,
   openEpubBook, exitViewer, switchFlowMode,
-  injectCustomToIframe, chapterAtPercent, seekToPercent,
+  injectCustomToIframe, reapplyInlineTheme, chapterAtPercent, seekToPercent,
   NavGuard, isEpubRuntimeReady, waitForEpubJS,
 } from './reader.js';
 import {
@@ -87,6 +87,8 @@ function mountReactiveBinders() {
       requestAnimationFrame(() => {
         try { store.rendition.themes.select(theme === 'custom' ? 'custom' : theme); }
         catch (e) { ErrorBoundary.handle('renderer', e, 'theme:select'); }
+        /* [버그 3B] 인라인 테마 재주입 — 해시 CSS 의존 없이 즉시 반영 */
+        reapplyInlineTheme();
       });
     }
     DOMProxy.qa('.theme-swatch').forEach(b => {
@@ -101,6 +103,7 @@ function mountReactiveBinders() {
     if (store.rendition) requestAnimationFrame(() => {
       try { store.rendition.themes.fontSize(`${size}%`); }
       catch (e) { ErrorBoundary.handle('renderer', e, 'fontSize'); }
+      reapplyInlineTheme();
     });
   });
 
@@ -114,6 +117,7 @@ function mountReactiveBinders() {
       requestAnimationFrame(() => {
         try { store.rendition.themes.override('line-height', val); }
         catch (e) { ErrorBoundary.handle('renderer', e, 'lineHeight'); }
+        reapplyInlineTheme();
       });
     }
   });

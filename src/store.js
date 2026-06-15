@@ -251,14 +251,21 @@ export const ResourceRegistry = (() => {
    ══════════════════════════════════════════════════════════ */
 export function showViewerScreen() {
   const up = DOMProxy.get('screen-uploader'), vi = DOMProxy.get('screen-viewer');
-  up.style.transition = 'opacity 300ms ease, transform 300ms ease';
-  up.style.opacity    = '0'; up.style.transform = 'scale(0.97)';
-  setTimeout(() => {
-    up.style.display = 'none'; up.style.opacity = ''; up.style.transform = '';
-    vi.style.display = 'flex'; vi.style.opacity = '0'; vi.style.transform = 'scale(1.02)';
-    vi.style.transition = 'opacity 300ms ease, transform 300ms ease';
-    requestAnimationFrame(() => requestAnimationFrame(() => { vi.style.opacity = '1'; vi.style.transform = 'scale(1)'; }));
-  }, 300);
+  /*
+   * [버그2 보강] 뷰어 컨테이너를 '즉시' 표시 상태로 만든다.
+   * 과거: 300ms setTimeout 후에야 display:flex가 되어, 그 사이에 실행되는
+   *       renderTo()가 0×0 컨테이너를 측정 → 본문 화이트아웃.
+   * 변경: 업로더를 숨기고 뷰어를 즉시 flex로 전환(측정 가능 상태 확보),
+   *       페이드-인만 rAF로 부드럽게 처리한다.
+   */
+  up.style.display = 'none'; up.style.opacity = ''; up.style.transform = '';
+  vi.style.display = 'flex';
+  vi.style.opacity = '0';
+  vi.style.transform = 'scale(1.01)';
+  vi.style.transition = 'opacity 280ms ease, transform 280ms ease';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    vi.style.opacity = '1'; vi.style.transform = 'scale(1)';
+  }));
   store.isViewerOpen = true;
 }
 

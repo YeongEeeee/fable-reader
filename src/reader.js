@@ -390,15 +390,56 @@ export function injectContentStyles(contents) {
   doc.getElementById('fable-injected')?.remove();
   const style = doc.createElement('style');
   style.id = 'fable-injected';
-  const themeBg = store.theme === 'dark' ? '#1a1a1e' : store.theme === 'white' ? '#ffffff' : store.theme === 'custom' ? store.userBg : '#fcfbf7';
+
+  /*
+   * [버그 3B] 해시화된 외부 CSS에 의존하지 않는 '인라인 테마 주입'.
+   * ───────────────────────────────────────────────────────────
+   * Vite 빌드 후 style.css는 index-[hash].css로 파일명이 바뀌므로,
+   * iframe 내부에서 상대경로 <link>로 테마 CSS를 불러오면 404가 난다.
+   * → 모든 독서 테마(배경/글자색/서체/폰트크기/행간/자간/다크 이미지
+   *   반전 감쇄)를 외부 파일 없이 인라인 <style>로 직접 주입한다.
+   */
+  const isDark   = store.theme === 'dark';
+  const isWhite  = store.theme === 'white';
+  const isCustom = store.theme === 'custom';
+  const themeBg  = isDark ? '#1a1a1e' : isWhite ? '#ffffff' : isCustom ? store.userBg  : '#fcfbf7';
+  const themeInk = isDark ? '#c8c6c0' : isWhite ? '#111111' : isCustom ? store.userInk : '#1a1814';
+
+  /* 서체 매핑 (settings.js FontLazyLoader와 동일 패밀리) */
+  const FONT_FAMILY = {
+    gowun:  "'Gowun Batang','Noto Serif KR',Georgia,serif",
+    noto:   "'Noto Serif KR',Georgia,serif",
+    sans:   "'Noto Sans KR',system-ui,sans-serif",
+    nanum:  "'Nanum Myeongjo',serif",
+    system: 'system-ui,-apple-system,sans-serif',
+  };
+  const fontFamily = FONT_FAMILY[store.fontFamily] || FONT_FAMILY.gowun;
+  const fontSize   = `${store.fontSize || 100}%`;
+  const lineHeight = ({ narrow: '1.5', normal: '1.85', wide: '2.3' })[store.lineHeight] || '1.85';
+  const spacing    = isCustom ? `${store.userSpacing || 0}em` : '0';
+
   /* [3]-7 다크 모드: 본문 내 흰 배경 이미지 대비 감쇄 */
-  const darkImg = store.theme === 'dark'
+  const darkImg = isDark
     ? 'img,svg,image{filter:brightness(0.8) contrast(1.2);opacity:0.92;}'
     : '';
+
   style.textContent = `
-    html,body { background:${themeBg} !important; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+    html,body {
+      background:${themeBg} !important;
+      color:${themeInk} !important;
+      font-family:${fontFamily} !important;
+      font-size:${fontSize} !important;
+      line-height:${lineHeight} !important;
+      letter-spacing:${spacing} !important;
+      -webkit-font-smoothing:antialiased;
+      text-rendering:optimizeLegibility;
+      word-break:keep-all; overflow-wrap:break-word;
+    }
+    p,li,blockquote,span,div,td { color:${themeInk} !important; line-height:${lineHeight} !important; }
+    a { color:${isDark ? '#8a8882' : 'inherit'} !important; }
     *,*::before,*::after { box-sizing:border-box; }
     p,div,span,li,td { page-break-inside:avoid; break-inside:avoid; }
+    img { max-width:100% !important; height:auto !important; }
     ${darkImg}
     mark.fable-search-mark { background:rgba(255,220,50,0.55); border-radius:2px; animation:fable-mark-pulse 1.2s ease-out forwards; }
     @keyframes fable-mark-pulse { 0% { background:rgba(255,165,0,0.75); } 100% { background:rgba(255,220,50,0.45); } }
@@ -409,12 +450,80 @@ export function injectContentStyles(contents) {
   doc.head.appendChild(style);
 }
 
+/* ── [버그2] 뷰어 가시성/실측 헬퍼 ── */
+
+/* #screen-viewer를 즉시 가시 상태로 강제 (renderTo 측정 직전) */
+function _ensureViewerVisible() {
+  const vi = DOMProxy.get('screen-viewer');
+  const up = DOMProxy.get('screen-uploader');
+  if (DOMProxy.exists('screen-uploader')) up.style.display = 'none';
+  if (DOMProxy.exists('screen-viewer')) {
+    /* display:none이면 측정이 0이 되므로 즉시 flex 확정 */
+    if (getComputedStyle(vi).display === 'none') vi.style.display = 'flex';
+    vi.style.opacity = '1';
+    vi.style.transform = 'none';
+  }
+}
+
+/* 뷰포트 실측 치수 (0이면 안전 폴백) */
+function _measureViewport(viewport) {
+  let w = 0, h = 0;
+  try {
+    const rect = viewport.getBoundingClientRect?.();
+    if (rect) { w = Math.floor(rect.width); h = Math.floor(rect.height); }
+  } catch (_) {}
+  /* 측정 실패/0 → 부모(reader-main-frame) 또는 윈도우 기준 폴백 */
+  if (!w || !h) {
+    const frame = DOMProxy.get('reader-main-frame');
+    try {
+      const r = frame.getBoundingClientRect?.();
+      if (r && r.width && r.height) { w = Math.floor(r.width); h = Math.floor(r.height); }
+    } catch (_) {}
+  }
+  if (!w) w = Math.max(320, window.innerWidth || 360);
+  if (!h) h = Math.max(400, (window.innerHeight || 640) - 110); /* nav+bottom bar 보정 */
+  return { width: w, height: h };
+}
+
+/* 표시 직후 실측 크기로 rendition을 재배치 (0px 잔재 제거) */
+function _resizeRenditionToViewport(rendition, viewport) {
+  if (!rendition) return;
+  /* 다음 두 프레임 뒤 실측 (레이아웃 확정 후) */
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    try {
+      const { width, height } = _measureViewport(viewport);
+      if (width > 1 && height > 1) rendition.resize(width, height);
+    } catch (_) {}
+  }));
+}
+
 export function initRenditionEngine(book) {
   const viewport = DOMProxy.get('viewer-viewport');
   if (!DOMProxy.exists('viewer-viewport')) return;
 
+  /*
+   * [버그2 수정] 화이트아웃(본문 0px 수축) 방지
+   * ───────────────────────────────────────────────────────────
+   * showViewerScreen()이 #screen-viewer를 display:none→flex로 바꾸는
+   * 타이밍(300ms 트랜지션)과 renderTo() 호출 시점이 어긋나면, epub.js가
+   * 컨테이너를 측정할 때 0×0 이라 iframe이 0px로 수축해 본문이 사라진다.
+   *
+   * 방어:
+   *  1) renderTo 전에 뷰어 컨테이너 가시성을 강제 확정(display 보정).
+   *  2) width/height를 '100%'가 아닌 '실측 px'로 넘겨 0 수축을 차단하고,
+   *     0이면 안전한 폴백 치수를 사용.
+   *  3) display 직후 ResizeObserver/rAF로 실측 크기를 재반영(resize).
+   */
+  _ensureViewerVisible();
+  const dims = _measureViewport(viewport);
+
   const rendition = book.renderTo(viewport, {
-    manager: 'continuous', flow: store.flow, width: '100%', height: '100%', spread: 'auto',
+    manager: 'continuous',
+    flow: store.flow,
+    width:  dims.width,
+    height: dims.height,
+    spread: 'auto',
+    allowScriptedContent: true,
   });
   store.rendition = rendition;
 
@@ -426,6 +535,8 @@ export function initRenditionEngine(book) {
   rendition.display(savedCFI || undefined)
     .then(() => {
       LoadingOverlay.hide();
+      /* 표시 직후 실측 크기로 한 번 더 resize → 0px 잔재 제거 */
+      _resizeRenditionToViewport(rendition, viewport);
       if (savedCFI) Toast.show('이전에 읽던 위치에서 시작합니다.', 'success');
       deps.SearchEngine.build(book);
       deps.AnnotationManager.init(rendition);
@@ -475,6 +586,19 @@ export function injectCustomToIframe() {
   } catch (e) { ErrorBoundary.handle('renderer', e, 'customTheme'); }
 }
 
+/*
+ * [버그 3B] 현재 열린 iframe 본문(들)에 인라인 테마를 강제 재주입.
+ * 서체/폰트크기/테마 변경 시 호출하면 외부 CSS(해시 404) 없이 즉시 반영된다.
+ */
+export function reapplyInlineTheme() {
+  if (!store.rendition) return;
+  try {
+    const contents = store.rendition.getContents?.() || [];
+    const arr = Array.isArray(contents) ? contents : [contents];
+    arr.forEach(c => { if (c?.document) injectContentStyles({ document: c.document }); });
+  } catch (e) { ErrorBoundary.handle('renderer', e, 'reapplyInlineTheme'); }
+}
+
 function _updateArrowState(location) {
   DOMProxy.get('arrow-prev').disabled = location.atStart === true;
   DOMProxy.get('arrow-next').disabled = location.atEnd   === true;
@@ -494,9 +618,29 @@ export async function destroyCurrentRenditionContext() {
   CFICache.clear();          /* [2]-5/6 메모이제이션 캐시 해제 */
   ResourceRegistry.releaseAll();
 
+  /*
+   * [버그 3C] 좀비 인스턴스 / 이벤트 이중구독 방지
+   * ───────────────────────────────────────────────────────────
+   * rendition.destroy() 이전에 등록된 모든 epub.js 이벤트(relocated/
+   * keyup/click/rendered)와 content 훅을 명시적으로 해제하여,
+   * 구 rendition 콜백이 전역 store 프록시를 이중 구독하는 누수를 차단.
+   */
+  if (store.rendition) {
+    const r = store.rendition;
+    try { r.off('relocated'); } catch (_) {}
+    try { r.off('keyup');     } catch (_) {}
+    try { r.off('click');     } catch (_) {}
+    try { r.off('rendered');  } catch (_) {}
+    try { r.off('displayed'); } catch (_) {}
+    /* content 훅 해제 (injectContentStyles 중복 등록 방지) */
+    try { r.hooks?.content?.clear?.(); } catch (_) {}
+  }
+
   const vp = DOMProxy.get('viewer-viewport');
   if (DOMProxy.exists('viewer-viewport')) {
-    vp.querySelectorAll('iframe').forEach(f => { f.src = 'about:blank'; f.remove(); });
+    vp.querySelectorAll('iframe').forEach(f => { try { f.src = 'about:blank'; } catch (_) {} f.remove(); });
+    /* 잔존 DOM 찌꺼기(epub.js manager가 남긴 컨테이너) 완전 소거 */
+    vp.innerHTML = '';
   }
 
   if (store.rendition) { try { store.rendition.destroy(); } catch (_) {} store.rendition = null; }
@@ -605,14 +749,28 @@ export const NavGuard = (() => {
   function _initResize(rendition) {
     const vp = DOMProxy.get('viewer-viewport');
     if (!DOMProxy.exists('viewer-viewport') || typeof ResizeObserver === 'undefined') return;
-    resizeObs = new ResizeObserver(entries => {
-      if (!store.rendition) return;
+    resizeObs = new ResizeObserver(() => {
+      /*
+       * [버그 3A] 리사이즈 안전 가드
+       * ─────────────────────────────────────────────────────
+       * - 뷰어가 실제로 열려 있고 rendition이 살아 있을 때만 동작.
+       * - ResizeObserver 엔트리의 contentRect는 트랜지션 중 0이거나
+       *   stale일 수 있으므로, 신뢰하지 않고 '현재 활성 컨테이너'의
+       *   실시간 가시 크기를 직접 역추적(getBoundingClientRect)한다.
+       * - 0px이면 resize를 건너뛰어 본문 증발/깨짐을 방지한다.
+       */
+      if (!store.rendition || !store.isViewerOpen) return;
       if (store.currentCFI) cfiSnap = store.currentCFI;
       ResizeMask.show();
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(async () => {
-        if (!store.rendition) { ResizeMask.hide(); return; }
-        const { width, height } = entries[entries.length - 1].contentRect;
+        if (!store.rendition || !store.isViewerOpen) { ResizeMask.hide(); return; }
+        /* 실시간 컨테이너 크기 역추적 (엔트리 contentRect 미신뢰) */
+        let width = 0, height = 0;
+        try {
+          const r = vp.getBoundingClientRect?.();
+          if (r) { width = Math.floor(r.width); height = Math.floor(r.height); }
+        } catch (_) {}
         if (width < 2 || height < 2) { ResizeMask.hide(); return; }
         try {
           navigating = false; pending = null;

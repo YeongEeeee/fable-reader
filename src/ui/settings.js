@@ -17,7 +17,7 @@ import {
   store, ReactiveStore, DOMProxy, Toast, setTextSafe, STATE_KEY,
 } from '../store.js';
 import { AnnotationSyncEngine } from '../sync.js';
-import { injectCustomToIframe } from '../reader.js';
+import { injectCustomToIframe, reapplyInlineTheme } from '../reader.js';
 
 /* ══════════════════════════════════════════════════════════
    §30. 폰트 업로더
@@ -76,6 +76,8 @@ const FontLazyLoader = (() => {
     }
     if (store.rendition) {
       try { store.rendition.themes.override('font-family', def.family + ' !important'); } catch (_) {}
+      /* [버그 3B] 인라인 테마도 즉시 재주입 (현재 iframe 문서에 반영) */
+      try { reapplyInlineTheme(); } catch (_) {}
     }
     store.fontFamily = fontId;
     localStorage.setItem('fable_font_family', fontId);
