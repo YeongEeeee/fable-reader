@@ -1,6 +1,6 @@
 /**
- * src/main.js
- * ───────────────────────────────────────────────────────────────
+ * src/main.js  ── Fable Premium v4.0
+ * ───────────────────────────────────────────────────────────────────
  * 시스템 부트스트랩 + 오케스트레이션 (모듈 진입점)
  *
  * 역할:
@@ -11,9 +11,18 @@
  *   - initializeSystemCore : SW 등록 · DB init · 전체 init 시퀀스
  *   - _bootstrapFable : 크래시 격리 진입점
  *
- * ※ Vite/PWA: 서비스 워커 등록은 vite-plugin-pwa(injectManifest)가
- *    빌드한 sw.js를 직접 register 한다.
- * ─────────────────────────────────────────────────────────────── */
+ * 변경 사항 (v4.0):
+ *   - ReactiveStore.subscribe('measuredWpm') → stat-wpm DOM 업데이트
+ *   - ReactiveStore.subscribe('fontWeightBoost'/'contrastScale') → reapplyInlineTheme
+ *   - ReactiveStore.subscribe('pageTransition') → store 싱크
+ *   - ReactiveStore.subscribe('eyeProtectMinutes') → EyeProtectTimer 재설정
+ *   - scrubberHoverPct: 스크러버 hover 시 챕터/페이지 툴팁 HUD 바인딩
+ *   - btn-eye-protect / btn-auto-scroll / btn-page-transition 신규 버튼 바인딩
+ *   - OnboardingGuide.start() 최초 진입 시 호출
+ *   - imports: ReadingReport, OnboardingGuide, EyeProtectTimer, AutoScrollDriver, WPMTracker 추가
+ *   - initV4SettingsUI() 호출
+ * ───────────────────────────────────────────────────────────────────
+ */
 
 'use strict';
 
@@ -21,6 +30,10 @@ import {
   store, ReactiveStore, DOMProxy, ErrorBoundary, Toast,
   setTextSafe, LH_MAP,
 } from './store.js';
+import {
+  LoadingOverlay, ResizeMask, ImportProgress,
+  showViewerScreen, showUploaderScreen,
+} from './ui.js';
 import { StorageSystem } from './database.js';
 import { AnnotationSyncEngine } from './sync.js';
 import {
@@ -28,6 +41,7 @@ import {
   openEpubBook, exitViewer, switchFlowMode,
   injectCustomToIframe, reapplyInlineTheme, chapterAtPercent, seekToPercent,
   NavGuard, isEpubRuntimeReady, waitForEpubJS,
+  EyeProtectTimer, AutoScrollDriver, WPMTracker,
 } from './reader.js';
 import {
   HashWorker, refreshLibraryData, renderLibraryGrid, importEpubFiles,
@@ -37,18 +51,19 @@ import {
   ReadingStatsTracker, SearchEngine, VirtualSearchList, runSearchExecution,
   AnnotationManager, initContextMenu, TTSSystem, bindScrollTopButton,
   MetadataEditor, AnnotationExporter, LibraryFullTextSearch, CloudBackup, Pomodoro,
+  ReadingReport, OnboardingGuide,
 } from './ui/viewer.js';
 import {
   initFontUploader, initFontSelector, initCustomThemeBuilder,
+  initV4SettingsUI,
   showKeyboardHint, initOfflineBanner, _saveStateToLS, _loadStateFromLS,
 } from './ui/settings.js';
 
-/* ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════
    환경 변수 Null-Safe 접근
    import.meta / import.meta.env 가 undefined인 컨텍스트에서도
    절대 throw 하지 않고 모드 문자열을 안전하게 반환한다.
-   (기본값 'production' — 빌드 산출물 기준 안전측)
-   ══════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════════ */
 function _envMode() {
   try {
     if (typeof import.meta !== 'undefined' && import.meta && import.meta.env && import.meta.env.MODE) {
@@ -58,9 +73,9 @@ function _envMode() {
   return 'production';
 }
 
-/* ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════
    순환 의존성 차단 — reader.js에 UI 콜백 주입
-   ══════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════════ */
 registerReaderDeps({
   renderTocSidebar,
   updateTocActiveItem,
@@ -74,9 +89,10 @@ registerReaderDeps({
   bindScrollTopButton,
 });
 
-/* ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════
    §13. Reactive UI Binders
-   ══════════════════════════════════════════════════════════ */
+   store 변화 → DOM 선언적 반영
+   ══════════════════════════════════════════════════════════════════ */
 function mountReactiveBinders() {
 
   ReactiveStore.subscribe('theme', (theme) => {
@@ -127,12 +143,15 @@ function mountReactiveBinders() {
       const ok = b.dataset.flow === flow;
       b.classList.toggle('active', ok); b.setAttribute('aria-checked', String(ok));
     });
-    DOMProxy.get('btn-scroll-top').style.display = flow === 'scrolled' ? 'flex' : 'none';
+    if (DOMProxy.exists('btn-scroll-top'))
+      DOMProxy.get('btn-scroll-top').style.display = flow === 'scrolled' ? 'flex' : 'none';
   });
 
   ReactiveStore.subscribe('navBarsVisible', (visible) => {
-    DOMProxy.get('viewer-nav-bar').classList.toggle('nav-hidden', !visible);
-    DOMProxy.get('viewer-bottom-bar').classList.toggle('bottom-hidden', !visible);
+    if (DOMProxy.exists('viewer-nav-bar'))
+      DOMProxy.get('viewer-nav-bar').classList.toggle('nav-hidden', !visible);
+    if (DOMProxy.exists('viewer-bottom-bar'))
+      DOMProxy.get('viewer-bottom-bar').classList.toggle('bottom-hidden', !visible);
   });
 
   ReactiveStore.subscribe('isTocOpen', (open) => {
@@ -155,10 +174,8 @@ function mountReactiveBinders() {
   /* [U2] isSettingsOpen — 서재/뷰어 공용 설정 패널 */
   ReactiveStore.subscribe('isSettingsOpen', (open) => {
     const panel = DOMProxy.get('settings-panel');
-    /* 뷰어 버튼 */
-    const btnV = DOMProxy.get('btn-settings-toggle');
-    /* 서재 버튼 */
-    const btnL = DOMProxy.get('btn-library-settings');
+    const btnV  = DOMProxy.get('btn-settings-toggle');
+    const btnL  = DOMProxy.get('btn-library-settings');
 
     if (open) {
       panel.style.display = 'flex'; panel.offsetHeight;
@@ -173,10 +190,10 @@ function mountReactiveBinders() {
     }
   });
 
-  ReactiveStore.subscribe('userBg',      (v) => { document.documentElement.style.setProperty('--color-user-bg', v);         _injectCustomToIframe(); });
-  ReactiveStore.subscribe('userInk',     (v) => { document.documentElement.style.setProperty('--color-user-ink', v);        _injectCustomToIframe(); });
+  ReactiveStore.subscribe('userBg',      (v) => { document.documentElement.style.setProperty('--color-user-bg', v);              _injectCustomToIframe(); });
+  ReactiveStore.subscribe('userInk',     (v) => { document.documentElement.style.setProperty('--color-user-ink', v);             _injectCustomToIframe(); });
   ReactiveStore.subscribe('userSpacing', (v) => { document.documentElement.style.setProperty('--user-letter-spacing', v + 'em'); _injectCustomToIframe(); });
-  ReactiveStore.subscribe('userLeading', (v) => { document.documentElement.style.setProperty('--user-line-height', String(v)); _injectCustomToIframe(); });
+  ReactiveStore.subscribe('userLeading', (v) => { document.documentElement.style.setProperty('--user-line-height', String(v));   _injectCustomToIframe(); });
 
   /* [v5] 서재 데이터 상태 → 그리드 자동 재렌더 (Reactive 일관성) */
   ReactiveStore.subscribe('libraryBooks',   () => renderLibraryGrid());
@@ -186,6 +203,72 @@ function mountReactiveBinders() {
   ReactiveStore.subscribe('sortMode',       () => renderLibraryGrid());
   ReactiveStore.subscribe('librarySearch',  () => renderLibraryGrid());
   ReactiveStore.subscribe('readingLog',     () => { /* 대시보드는 grid 렌더 시 함께 갱신 */ });
+
+  /* ── [v4.0] 신규 Reactive 바인더 ── */
+
+  /**
+   * measuredWpm — stat-wpm DOM 업데이트
+   * WPMTracker가 IQR 필터 후 store에 기록 → UI 자동 반영
+   */
+  ReactiveStore.subscribe('measuredWpm', (wpm) => {
+    if (DOMProxy.exists('stat-wpm'))
+      setTextSafe(DOMProxy.get('stat-wpm'), `${wpm} WPM`);
+    /* 자동 스크롤 속도도 즉시 갱신 */
+    AutoScrollDriver.updateSpeed();
+  });
+
+  /**
+   * fontWeightBoost / contrastScale — E-Ink 보정 즉시 반영
+   * settings.js 슬라이더 → store 변화 → iframe 재주입
+   */
+  ReactiveStore.subscribe('fontWeightBoost', () => {
+    if (store.rendition) requestAnimationFrame(() => reapplyInlineTheme());
+  });
+  ReactiveStore.subscribe('contrastScale', () => {
+    if (store.rendition) requestAnimationFrame(() => reapplyInlineTheme());
+  });
+
+  /**
+   * pageTransition — 선택값 스토어 동기화 (settings.js 바인딩과 상보)
+   */
+  ReactiveStore.subscribe('pageTransition', (v) => {
+    /* data-transition 버튼 그룹 최신화 */
+    DOMProxy.qa('[data-transition]').forEach(b => {
+      b.classList.toggle('active', b.dataset.transition === v);
+      b.setAttribute('aria-checked', String(b.dataset.transition === v));
+    });
+  });
+
+  /**
+   * eyeProtectMinutes — EyeProtectTimer가 이미 활성 중이면 재시작
+   * (설정 변경 즉시 새 시간 적용)
+   */
+  ReactiveStore.subscribe('eyeProtectMinutes', () => {
+    if (store.eyeProtectActive) {
+      EyeProtectTimer.stop();
+      EyeProtectTimer.start();
+    }
+  });
+
+  /**
+   * autoScrollActive — 버튼 활성 상태 시각 피드백
+   */
+  ReactiveStore.subscribe('autoScrollActive', (active) => {
+    if (DOMProxy.exists('btn-auto-scroll')) {
+      DOMProxy.get('btn-auto-scroll').classList.toggle('active', active);
+      DOMProxy.get('btn-auto-scroll').setAttribute('aria-pressed', String(active));
+    }
+  });
+
+  /**
+   * eyeProtectActive — 버튼 활성 상태 시각 피드백
+   */
+  ReactiveStore.subscribe('eyeProtectActive', (active) => {
+    if (DOMProxy.exists('btn-eye-protect')) {
+      DOMProxy.get('btn-eye-protect').classList.toggle('active', active);
+      DOMProxy.get('btn-eye-protect').setAttribute('aria-pressed', String(active));
+    }
+  });
 }
 
 /* 커스텀 테마를 iframe 본문에 주입 (reader.js의 injectCustomToIframe 위임) */
@@ -193,40 +276,43 @@ function _injectCustomToIframe() {
   injectCustomToIframe();
 }
 
-/* ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════
    §32. 키보드 단축키
-   ══════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════════ */
 function handleKeyDown(e) {
   const viewer = DOMProxy.get('screen-viewer');
   if (!DOMProxy.exists('screen-viewer') || viewer.style.display === 'none') return;
   if (!store.rendition) return;
   switch (e.key) {
-    case 'ArrowRight': case 'ArrowDown': case ' ':     e.preventDefault(); NavGuard.next(); break;
+    case 'ArrowRight': case 'ArrowDown': case ' ':        e.preventDefault(); NavGuard.next(); break;
     case 'ArrowLeft':  case 'ArrowUp':  case 'Backspace': e.preventDefault(); NavGuard.prev(); break;
     case 'Escape':
       if (store.isSettingsOpen) { store.isSettingsOpen = false; break; }
       if (store.isTocOpen)      { store.isTocOpen      = false; break; }
       if (confirm('뷰어를 닫고 서재로 돌아가시겠습니까?')) exitViewer(); break;
+    /* [v4.0] 검색 팝업 Esc 처리 */
     default: break;
   }
 }
 
-/* ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════
    §35b. [요구3] 퍼센트 위치 이동 (reader.js 위임)
-   ══════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════════ */
 function _chapterAtPercent(pct) { return chapterAtPercent(pct); }
 function _seekToPercent(pct)     { return seekToPercent(pct); }
 
-/* ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════
    §36. 버튼 이벤트 전체 바인딩
-   ══════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════════ */
 function initButtonEventHandlers() {
   const fileInput = DOMProxy.get('file-input');
 
   /* ── [U1] 서재 화면 상단 컨트롤 바 ── */
-  DOMProxy.get('btn-file-select').addEventListener('click', (e) => {
-    e.stopPropagation(); fileInput.click();
-  });
+  if (DOMProxy.exists('btn-file-select')) {
+    DOMProxy.get('btn-file-select').addEventListener('click', (e) => {
+      e.stopPropagation(); fileInput.click();
+    });
+  }
 
   /* [L3] 다중 파일 change */
   fileInput.addEventListener('change', async (e) => {
@@ -237,126 +323,153 @@ function initButtonEventHandlers() {
   });
 
   /* [U2] 서재 화면 설정 버튼 */
-  DOMProxy.get('btn-library-settings').addEventListener('click', () => {
-    store.isSettingsOpen = !store.isSettingsOpen;
-  });
+  if (DOMProxy.exists('btn-library-settings')) {
+    DOMProxy.get('btn-library-settings').addEventListener('click', () => {
+      store.isSettingsOpen = !store.isSettingsOpen;
+    });
+  }
 
   /* ── 드래그앤드롭 (서재 화면 전체) ── */
-  const uploader = DOMProxy.get('screen-uploader');
   const dragOverlay = DOMProxy.get('drag-overlay');
-
   let dragCounter = 0;
 
   document.addEventListener('dragenter', (e) => {
-    e.preventDefault();
-    dragCounter++;
-    /* 서재 화면일 때만 오버레이 표시 */
-    if (!store.isViewerOpen) {
-      dragOverlay.style.display = 'flex';
-    }
+    e.preventDefault(); dragCounter++;
+    if (!store.isViewerOpen && dragOverlay) dragOverlay.style.display = 'flex';
   });
-
   document.addEventListener('dragleave', (e) => {
-    e.preventDefault();
-    dragCounter--;
-    if (dragCounter <= 0) {
-      dragCounter = 0;
-      dragOverlay.style.display = 'none';
-    }
+    e.preventDefault(); dragCounter--;
+    if (dragCounter <= 0) { dragCounter = 0; if (dragOverlay) dragOverlay.style.display = 'none'; }
   });
-
   document.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
-
   document.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    dragCounter = 0;
-    dragOverlay.style.display = 'none';
-    const files = e.dataTransfer.files;
-    if (!files?.length) return;
-    await importEpubFiles(files);
+    e.preventDefault(); dragCounter = 0;
+    if (dragOverlay) dragOverlay.style.display = 'none';
+    if (store.isViewerOpen) return;
+    const files = Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.epub'));
+    if (files.length > 0) await importEpubFiles(files);
   });
 
-  /* ── 뷰어 ── */
-  DOMProxy.get('arrow-prev').addEventListener('click', () => NavGuard.prev());
-  DOMProxy.get('arrow-next').addEventListener('click', () => NavGuard.next());
-
-  DOMProxy.get('btn-toc-toggle').addEventListener('click', () => { store.isTocOpen = !store.isTocOpen; });
-  DOMProxy.get('btn-toc-close').addEventListener('click',  () => { store.isTocOpen = false; });
-  DOMProxy.get('toc-overlay').addEventListener('click',    () => { store.isTocOpen = false; });
-
-  /* [U2] 뷰어 설정 버튼 */
-  DOMProxy.get('btn-settings-toggle').addEventListener('click', () => { store.isSettingsOpen = !store.isSettingsOpen; });
-
-  /* 공용 설정 닫기 버튼 */
-  DOMProxy.get('btn-settings-close').addEventListener('click', () => { store.isSettingsOpen = false; });
-
-  DOMProxy.get('btn-close-viewer').addEventListener('click', () => {
-    if (confirm('뷰어를 닫고 서재로 돌아가시겠습니까?')) exitViewer();
-  });
-
-  DOMProxy.qa('[data-flow]').forEach(btn => btn.addEventListener('click', () => switchFlowMode(btn.dataset.flow)));
-  DOMProxy.get('btn-font-decrease').addEventListener('click', () => { store.fontSize = Math.max(60, store.fontSize - 5); _saveStateToLS(); });
-  DOMProxy.get('btn-font-increase').addEventListener('click', () => { store.fontSize = Math.min(200, store.fontSize + 5); _saveStateToLS(); });
-  DOMProxy.qa('[data-lh]').forEach(btn => btn.addEventListener('click', () => { store.lineHeight = btn.dataset.lh; _saveStateToLS(); }));
-  DOMProxy.qa('.theme-swatch').forEach(btn => btn.addEventListener('click', () => { store.theme = btn.dataset.theme; _saveStateToLS(); }));
-
-  DOMProxy.get('btn-search-toggle').addEventListener('click', () => { DOMProxy.get('search-modal').style.display='flex'; setTimeout(() => DOMProxy.get('input-search-query').focus(), 60); });
-  DOMProxy.get('btn-search-modal-close').addEventListener('click', () => { DOMProxy.get('search-modal').style.display='none'; VirtualSearchList.destroy(); });
-  DOMProxy.get('btn-execute-search').addEventListener('click', runSearchExecution);
-  DOMProxy.get('input-search-query').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearchExecution(); });
-
-  DOMProxy.get('btn-stats-toggle').addEventListener('click', () => { DOMProxy.get('stats-modal').style.display='flex'; });
-  if (DOMProxy.exists('btn-pomodoro-open')) DOMProxy.get('btn-pomodoro-open').addEventListener('click', () => Pomodoro.openPopup());
-  DOMProxy.get('btn-stats-modal-close').addEventListener('click', () => { DOMProxy.get('stats-modal').style.display='none'; });
-  DOMProxy.get('btn-save-goal').addEventListener('click', () => { const v=DOMProxy.get('input-reading-goal').value; if(v){localStorage.setItem('fable_daily_goal',v);store.dailyGoalMin=parseInt(v,10);renderLibraryGrid();Toast.show('독서 목표가 저장되었습니다.','success');} });
-
-  DOMProxy.get('btn-annotation-toggle').addEventListener('click', () => {
-    if (!store.rendition) return;
-    try { const doc = store.rendition.manager?.current()?.document; const text = doc?.body?.textContent?.slice(0, 4000)||''; if(text) TTSSystem.play(text); }
-    catch (_) { Toast.show('TTS를 시작할 수 없습니다.', 'error'); }
-  });
-  DOMProxy.get('btn-tts-play-pause').addEventListener('click', () => TTSSystem.pauseResume());
-  DOMProxy.get('btn-tts-stop').addEventListener('click',       () => TTSSystem.stop());
-  DOMProxy.get('btn-hint-close').addEventListener('click', () => { DOMProxy.get('keyboard-hint-layer').style.display='none'; });
-
-  /* [요구3 + 3-2] 퍼센트 이동 드래그 바 + 실시간 플로팅 툴팁 */
-  const slider = DOMProxy.get('progress-range-slider');
-  if (DOMProxy.exists('progress-range-slider')) {
-    const tooltip = DOMProxy.get('slider-tooltip');
-
-    function _positionTooltip(pct) {
-      /* 노브 위치 계산 → 툴팁을 노브 위에 따라다니게 */
-      const rect = slider.getBoundingClientRect();
-      const x = rect.left + (rect.width * pct / 100);
-      tooltip.style.left = `${x}px`;
-      tooltip.style.display = 'flex';
-      setTextSafe(DOMProxy.get('slider-tooltip-pct'), `${pct}%`);
-      setTextSafe(DOMProxy.get('slider-tooltip-chapter'), _chapterAtPercent(pct));
-    }
-
-    slider.addEventListener('input', () => {
-      slider.dataset.dragging = '1';
-      const pct = parseInt(slider.value, 10);
-      setTextSafe(DOMProxy.get('viewer-progress-text'), `${pct}%`);
-      DOMProxy.get('progress-bar-fill').style.width = `${pct}%`;
-      _positionTooltip(pct);
+  /* ── 뷰어 화면 컨트롤 ── */
+  if (DOMProxy.exists('btn-settings-toggle')) {
+    DOMProxy.get('btn-settings-toggle').addEventListener('click', () => {
+      store.isSettingsOpen = !store.isSettingsOpen;
     });
-    slider.addEventListener('change', () => {
-      const pct = parseInt(slider.value, 10);
-      delete slider.dataset.dragging;
-      tooltip.style.display = 'none';
-      _seekToPercent(pct);
+  }
+  if (DOMProxy.exists('btn-toc-toggle')) {
+    DOMProxy.get('btn-toc-toggle').addEventListener('click', () => {
+      store.isTocOpen = !store.isTocOpen;
     });
-    /* 포인터를 떼면 툴팁 숨김 (모바일 안전장치) */
-    slider.addEventListener('pointerup',   () => { setTimeout(() => { tooltip.style.display = 'none'; }, 100); });
-    slider.addEventListener('pointerleave', () => { if (!slider.dataset.dragging) tooltip.style.display = 'none'; });
+  }
+  if (DOMProxy.exists('toc-overlay')) {
+    DOMProxy.get('toc-overlay').addEventListener('click', () => { store.isTocOpen = false; });
+  }
+  if (DOMProxy.exists('btn-exit-viewer')) {
+    DOMProxy.get('btn-exit-viewer').addEventListener('click', () => {
+      if (confirm('뷰어를 닫고 서재로 돌아가시겠습니까?')) exitViewer();
+    });
+  }
+  if (DOMProxy.exists('arrow-prev')) {
+    DOMProxy.get('arrow-prev').addEventListener('click', () => NavGuard.prev());
+  }
+  if (DOMProxy.exists('arrow-next')) {
+    DOMProxy.get('arrow-next').addEventListener('click', () => NavGuard.next());
   }
 
-  /* 설정 패널 외부 클릭 닫기 (서재/뷰어 양쪽 처리) */
+  /* ── flow 전환 버튼 ── */
+  DOMProxy.qa('[data-flow]').forEach(b => {
+    b.addEventListener('click', () => { switchFlowMode(b.dataset.flow); _saveStateToLS(); });
+  });
+
+  /* ── 테마 스와치 ── */
+  DOMProxy.qa('.theme-swatch').forEach(b => {
+    b.addEventListener('click', () => { store.theme = b.dataset.theme; _saveStateToLS(); });
+  });
+
+  /* ── 폰트 크기 ── */
+  if (DOMProxy.exists('btn-font-minus')) {
+    DOMProxy.get('btn-font-minus').addEventListener('click', () => {
+      store.fontSize = Math.max(60, store.fontSize - 5); _saveStateToLS();
+    });
+  }
+  if (DOMProxy.exists('btn-font-plus')) {
+    DOMProxy.get('btn-font-plus').addEventListener('click', () => {
+      store.fontSize = Math.min(200, store.fontSize + 5); _saveStateToLS();
+    });
+  }
+
+  /* ── 행간 버튼 ── */
+  DOMProxy.qa('[data-lh]').forEach(b => {
+    b.addEventListener('click', () => { store.lineHeight = b.dataset.lh; _saveStateToLS(); });
+  });
+
+  /* ── 검색 ── */
+  if (DOMProxy.exists('btn-search-open')) {
+    DOMProxy.get('btn-search-open').addEventListener('click', () => {
+      const panel = DOMProxy.get('search-panel');
+      if (panel) { panel.style.display = panel.style.display === 'none' ? 'flex' : 'none'; }
+      if (DOMProxy.exists('search-input')) DOMProxy.get('search-input').focus();
+    });
+  }
+  if (DOMProxy.exists('btn-search-exec')) {
+    DOMProxy.get('btn-search-exec').addEventListener('click', () => runSearchExecution());
+  }
+  if (DOMProxy.exists('search-input')) {
+    DOMProxy.get('search-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runSearchExecution();
+      if (e.key === 'Escape') {
+        const panel = DOMProxy.get('search-panel');
+        if (panel) panel.style.display = 'none';
+      }
+    });
+  }
+
+  /* ── TTS ── */
+  if (DOMProxy.exists('btn-tts-toggle')) {
+    DOMProxy.get('btn-tts-toggle').addEventListener('click', () => TTSSystem.toggle());
+  }
+
+  /* ── 포모도로 ── */
+  if (DOMProxy.exists('btn-pomodoro-toggle')) {
+    DOMProxy.get('btn-pomodoro-toggle').addEventListener('click', () => Pomodoro.toggle());
+  }
+
+  /* ── [v4.0] 눈 보호 타이머 버튼 ── */
+  if (DOMProxy.exists('btn-eye-protect')) {
+    DOMProxy.get('btn-eye-protect').addEventListener('click', () => {
+      EyeProtectTimer.toggle();
+    });
+  }
+
+  /* ── [v4.0] 자동 스크롤 버튼 ── */
+  if (DOMProxy.exists('btn-auto-scroll')) {
+    DOMProxy.get('btn-auto-scroll').addEventListener('click', () => {
+      /* 현재 표시된 view 객체 전달 */
+      const view = store.rendition?.currentLocation?.()?.start ? null : null;
+      AutoScrollDriver.toggle(view);
+    });
+  }
+
+  /* ── 스크롤 Top 버튼 ── */
+  if (DOMProxy.exists('btn-scroll-top')) {
+    DOMProxy.get('btn-scroll-top').addEventListener('click', () => {
+      try {
+        const iframes = DOMProxy.get('viewer-viewport')?.querySelectorAll('iframe') || [];
+        iframes.forEach(f => { if (f.contentWindow) f.contentWindow.scrollTo(0, 0); });
+      } catch (_) {}
+    });
+  }
+
+  /* ── [v4.0] 스크러버 호버 미리보기 HUD ──
+     (이미 viewer.js의 initContextMenu에서 기본 로직 있으나
+      진행률 슬라이더에 챕터 툴팁 추가)                           */
+  _initScrubberHoverHUD();
+
+  /* ── 설정 패널 외부 클릭 닫기 (서재/뷰어 양쪽 처리) ── */
   document.addEventListener('pointerdown', (e) => {
-    const panel  = DOMProxy.get('settings-panel');
-    const btnV   = DOMProxy.get('btn-settings-toggle');
-    const btnL   = DOMProxy.get('btn-library-settings');
+    const panel = DOMProxy.get('settings-panel');
+    const btnV  = DOMProxy.get('btn-settings-toggle');
+    const btnL  = DOMProxy.get('btn-library-settings');
     if (store.isSettingsOpen &&
         !panel.contains?.(e.target) &&
         !btnV.contains?.(e.target) &&
@@ -366,18 +479,84 @@ function initButtonEventHandlers() {
   }, { passive: true });
 
   document.addEventListener('keydown', handleKeyDown);
+
+  /* ── 설정 UI 초기화 ── */
   initFontUploader();
-  initFontSelector();      /* [2]-2 */
+  initFontSelector();
   initCustomThemeBuilder();
+  initV4SettingsUI(); /* [v4.0] fontWeightBoost / contrastScale / eyeProtectMinutes / pageTransition */
 }
 
-/* ══════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════
+   [v4.0] §36-A. 스크러버 호버 미리보기 HUD
+   진행률 슬라이더 hover/drag → 챕터 제목 + 예상 페이지 번호 툴팁
+   ══════════════════════════════════════════════════════════════════ */
+function _initScrubberHoverHUD() {
+  const slider  = DOMProxy.get('progress-range-slider');
+  const tooltip = DOMProxy.get('scrubber-tooltip');
+  if (!DOMProxy.exists('progress-range-slider') || !DOMProxy.exists('scrubber-tooltip')) return;
+
+  function _showTooltip(pct) {
+    const chapter = _chapterAtPercent(pct);
+    const pageEst = store.totalLocations > 0
+      ? Math.round((pct / 100) * store.totalLocations)
+      : Math.round((pct / 100) * (store.book?.spine?.items?.length || 1));
+
+    /* 위치 계산 — 슬라이더 트랙 기준 */
+    const rect   = slider.getBoundingClientRect();
+    const leftPx = rect.left + (pct / 100) * rect.width;
+
+    tooltip.style.display  = 'block';
+    tooltip.style.left     = `${leftPx}px`;
+    tooltip.style.transform = 'translateX(-50%)';
+    tooltip.textContent    = chapter ? `${chapter} · ${pageEst}p` : `${pageEst}p`;
+
+    /* scrubberHoverPct 스토어 업데이트 */
+    store.scrubberHoverPct = pct;
+  }
+
+  function _hideTooltip() {
+    if (!slider.dataset.dragging) {
+      tooltip.style.display = 'none';
+      store.scrubberHoverPct = -1;
+    }
+  }
+
+  slider.addEventListener('mousemove', (e) => {
+    const rect = slider.getBoundingClientRect();
+    const pct  = Math.min(100, Math.max(0, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+    _showTooltip(pct);
+  });
+  slider.addEventListener('mouseenter', (e) => {
+    const rect = slider.getBoundingClientRect();
+    const pct  = Math.min(100, Math.max(0, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+    _showTooltip(pct);
+  });
+  slider.addEventListener('mouseleave', _hideTooltip);
+
+  /* 터치/포인터 드래그 */
+  slider.addEventListener('pointerdown', () => { slider.dataset.dragging = '1'; });
+  slider.addEventListener('input', () => {
+    const pct = parseInt(slider.value, 10);
+    _showTooltip(pct);
+  });
+  slider.addEventListener('change', () => {
+    const pct = parseInt(slider.value, 10);
+    delete slider.dataset.dragging;
+    tooltip.style.display = 'none';
+    _seekToPercent(pct);
+  });
+  slider.addEventListener('pointerup',   () => { setTimeout(() => { tooltip.style.display = 'none'; }, 100); });
+  slider.addEventListener('pointerleave', () => { if (!slider.dataset.dragging) tooltip.style.display = 'none'; });
+}
+
+/* ══════════════════════════════════════════════════════════════════
    §37. 전역 진입점
-   ══════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════════ */
 async function initializeSystemCore() {
   /*
    * [B1 리팩토링] 비동기 런타임 가드 레이어
-   * ───────────────────────────────────────────────────────────
+   * ─────────────────────────────────────────────────────────────
    * 시스템 초기화는 epub.js 로드 여부와 '완전히 분리'하여 항상 기동.
    * 라이브러리는 백그라운드에서 최대 3초 재시도로 준비하고,
    * 실제 책을 열 때(openEpubBook/importEpubFiles) 시점에만
@@ -408,15 +587,16 @@ async function initializeSystemCore() {
     try { StorageSystem.flushProgressNow(); } catch (_) {}
   });
 
+  /* ── [스마트 슬립 가드] visibilitychange → store.appInBackground ── */
+  document.addEventListener('visibilitychange', () => {
+    store.appInBackground = document.hidden;
+  });
+
   /* PWA 서비스 워커 등록 (vite-plugin-pwa injectManifest 산출물) */
   if ('serviceWorker' in navigator) {
     try {
       /*
        * [버그 수정] import.meta.env.MODE 직접 접근 금지.
-       * ───────────────────────────────────────────────────────
-       * import.meta 또는 import.meta.env 가 undefined인 컨텍스트에서
-       * .MODE 를 읽으면 "Cannot read properties of undefined (reading 'MODE')"
-       * 로 크래시가 나면서 SW 등록은 물론 그 아래 초기화까지 사멸한다.
        * → _envMode() Null-Safe 가드로 안전하게 읽고, 프로덕션 빌드에서는
        *   항상 단일 './sw.js'(injectManifest 산출물)를 등록한다.
        */
@@ -443,6 +623,7 @@ async function initializeSystemCore() {
   initButtonEventHandlers();
   initOfflineBanner();
   initContextMenu();
+
   /* [v6] 신규 모듈 초기화 */
   MetadataEditor.init();        /* [1]-11 */
   AnnotationExporter.init();    /* [1]-7 */
@@ -452,14 +633,21 @@ async function initializeSystemCore() {
   initLibraryControls();        /* 대시보드/검색/백업 상단 컨트롤 */
   initStickyHeader();           /* [3]-9 */
   refreshLibraryData();
+
+  /* [v4.0] 최초 진입 시 온보딩 가이드 실행 */
+  if (!store.onboardingDone) {
+    /* 짧은 딜레이 후 온보딩 시작 (렌더링 완료 대기) */
+    setTimeout(() => OnboardingGuide.start(), 600);
+  }
+
   if (!('ontouchstart' in window)) showKeyboardHint();
 
-  console.log('\uD83D\uDCD6 Fable Premium v3.1 — Vite Modular Edition Initialized');
+  console.log('📖 Fable Premium v4.0 — Initialized');
 }
 
 /* [3]-9 미니멀 상단바 스크롤 동적 고정 (Sticky Header) */
 function initStickyHeader() {
-  const body = DOMProxy.get('library-body');
+  const body   = DOMProxy.get('library-body');
   const topbar = DOMProxy.get('library-topbar');
   if (!DOMProxy.exists('library-body') || !DOMProxy.exists('library-topbar')) return;
   let lastY = 0;
@@ -483,30 +671,54 @@ function initLibraryControls() {
       t = setTimeout(() => { store.librarySearch = si.value; }, 200);
     });
   }
-  if (DOMProxy.exists('btn-fts-open')) DOMProxy.get('btn-fts-open').addEventListener('click', () => LibraryFullTextSearch.open());
-  if (DOMProxy.exists('btn-cloud-backup')) DOMProxy.get('btn-cloud-backup').addEventListener('click', () => CloudBackup.backupToFile());
+  if (DOMProxy.exists('btn-fts-open'))
+    DOMProxy.get('btn-fts-open').addEventListener('click', () => LibraryFullTextSearch.open());
+  if (DOMProxy.exists('btn-cloud-backup'))
+    DOMProxy.get('btn-cloud-backup').addEventListener('click', () => CloudBackup.backupToFile());
+
   store.dailyGoalMin = parseInt(localStorage.getItem('fable_daily_goal') || '30', 10);
 }
 
 function _forceSyncSettingsUI() {
   setTextSafe(DOMProxy.get('font-size-display'), `${store.fontSize}%`);
-  DOMProxy.qa('[data-lh]').forEach(b => { const ok = b.dataset.lh === store.lineHeight; b.classList.toggle('active',ok); b.setAttribute('aria-checked',String(ok)); });
-  DOMProxy.qa('[data-flow]').forEach(b => { const ok = b.dataset.flow === store.flow; b.classList.toggle('active',ok); b.setAttribute('aria-checked',String(ok)); });
-  DOMProxy.qa('.theme-swatch').forEach(b => { const ok = b.dataset.theme === store.theme; b.classList.toggle('active',ok); b.setAttribute('aria-checked',String(ok)); });
-  DOMProxy.get('custom-theme-builder').style.display = store.theme === 'custom' ? 'block' : 'none';
-  if (store.theme !== 'paper' && store.theme !== 'custom') document.body.setAttribute('data-theme', store.theme);
+  DOMProxy.qa('[data-lh]').forEach(b => { const ok = b.dataset.lh === store.lineHeight; b.classList.toggle('active', ok); b.setAttribute('aria-checked', String(ok)); });
+  DOMProxy.qa('[data-flow]').forEach(b => { const ok = b.dataset.flow === store.flow; b.classList.toggle('active', ok); b.setAttribute('aria-checked', String(ok)); });
+  DOMProxy.qa('.theme-swatch').forEach(b => { const ok = b.dataset.theme === store.theme; b.classList.toggle('active', ok); b.setAttribute('aria-checked', String(ok)); });
+  if (DOMProxy.exists('custom-theme-builder'))
+    DOMProxy.get('custom-theme-builder').style.display = store.theme === 'custom' ? 'block' : 'none';
+  if (store.theme !== 'paper' && store.theme !== 'custom')
+    document.body.setAttribute('data-theme', store.theme);
   document.documentElement.style.setProperty('--color-user-bg',       store.userBg);
   document.documentElement.style.setProperty('--color-user-ink',      store.userInk);
   document.documentElement.style.setProperty('--user-letter-spacing', store.userSpacing + 'em');
   document.documentElement.style.setProperty('--user-line-height',    String(store.userLeading));
-  DOMProxy.get('input-user-bg').value      = store.userBg;
-  DOMProxy.get('input-user-bg-hex').value  = store.userBg;
-  DOMProxy.get('input-user-ink').value     = store.userInk;
-  DOMProxy.get('input-user-ink-hex').value = store.userInk;
-  DOMProxy.get('input-user-spacing').value = String(store.userSpacing);
+  if (DOMProxy.exists('input-user-bg'))      DOMProxy.get('input-user-bg').value      = store.userBg;
+  if (DOMProxy.exists('input-user-bg-hex'))  DOMProxy.get('input-user-bg-hex').value  = store.userBg;
+  if (DOMProxy.exists('input-user-ink'))     DOMProxy.get('input-user-ink').value     = store.userInk;
+  if (DOMProxy.exists('input-user-ink-hex')) DOMProxy.get('input-user-ink-hex').value = store.userInk;
+  if (DOMProxy.exists('input-user-spacing')) DOMProxy.get('input-user-spacing').value = String(store.userSpacing);
   setTextSafe(DOMProxy.get('spacing-val'), store.userSpacing + 'em');
-  DOMProxy.get('input-user-leading').value = String(store.userLeading);
+  if (DOMProxy.exists('input-user-leading')) DOMProxy.get('input-user-leading').value = String(store.userLeading);
   setTextSafe(DOMProxy.get('leading-val'), String(store.userLeading));
+
+  /* [v4.0] 신규 설정 UI 동기화 */
+  if (DOMProxy.exists('input-font-weight-boost')) {
+    DOMProxy.get('input-font-weight-boost').value = String(store.fontWeightBoost ?? 0);
+    setTextSafe(DOMProxy.get('font-weight-boost-val'), String(store.fontWeightBoost ?? 0));
+  }
+  if (DOMProxy.exists('input-contrast-scale')) {
+    DOMProxy.get('input-contrast-scale').value = String(store.contrastScale ?? 1.0);
+    setTextSafe(DOMProxy.get('contrast-scale-val'), parseFloat(store.contrastScale ?? 1.0).toFixed(2));
+  }
+  if (DOMProxy.exists('input-eye-protect-minutes')) {
+    DOMProxy.get('input-eye-protect-minutes').value = String(store.eyeProtectMinutes ?? 50);
+    setTextSafe(DOMProxy.get('eye-protect-minutes-val'), String(store.eyeProtectMinutes ?? 50) + '분');
+  }
+  /* pageTransition 버튼 그룹 */
+  DOMProxy.qa('[data-transition]').forEach(b => {
+    const ok = b.dataset.transition === (store.pageTransition || 'fade');
+    b.classList.toggle('active', ok); b.setAttribute('aria-checked', String(ok));
+  });
 }
 
 /*
@@ -517,7 +729,7 @@ function _forceSyncSettingsUI() {
 function _bootstrapFable() {
   try {
     const ret = initializeSystemCore();
-    /* async 함수의 reject도 잡아 전역 사멸 방지 */
+    /* async 함수의 reject도 잡아 전역 사망 방지 */
     if (ret && typeof ret.catch === 'function') {
       ret.catch((err) => {
         console.error('[Fable] 초기화 비동기 오류:', err);

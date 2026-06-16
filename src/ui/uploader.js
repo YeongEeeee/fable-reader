@@ -1,67 +1,165 @@
 /**
- * src/ui/uploader.js
- * ───────────────────────────────────────────────────────────────
+ * src/ui/uploader.js  ── Fable Premium v4.0
+ * ─────────────────────────────────────────────────────────────────
  * 서재(책장) UI + 업로더 인터랙션
  *
+ * v4.0 고도화 사항:
+ *   [다중 서재 폴더 트리 계층화]  계층 트리형 폴더 구조 + 흡입 D&D 애니메이션
+ *   [가상 청크 그리드 렌더러]     1000권+ 대량 서재 Virtual Scroll (뷰포트 기반 마운트/언마운트)
+ *   [스켈레톤 UI]               로딩 시 keyframe shimmer 플레이스홀더 노출
+ *
  * 보존된 스펙:
- *   - HashWorker (Web Worker 해시 + 메인스레드 폴백)
- *   - refreshLibraryData (books/folders/tags/readingLog → store)
- *   - 표지/HSL 플레이스홀더, 최근 읽은 책, 폴더 바(드래그&드롭),
- *     태그 바, 분석 대시보드, 도서 카드 메뉴, 가상 청크 그리드 렌더
- *   - [2]-9 AbortController 그리드 렌더 뮤텍스
- *   - [L3] 다중 파일 순차 등록 파이프라인 + [2]-3 배치 트랜잭션 + 중복 방지
- * ─────────────────────────────────────────────────────────────── */
+ *   HashWorker, refreshLibraryData, 표지/HSL 플레이스홀더,
+ *   최근 읽은 책, 폴더 바 D&D, 태그 바, 분석 대시보드,
+ *   도서 카드 메뉴, AbortController 그리드 렌더 뮤텍스,
+ *   [L3] 다중 파일 순차 등록 파이프라인 + 배치 트랜잭션 + 중복 방지
+ * ─────────────────────────────────────────────────────────────────
+ */
 
 'use strict';
 
 import {
   store, ReactiveStore, DOMProxy, ErrorBoundary, Toast,
-  setTextSafe, RECENT_MAX, ImportProgress,
+  setTextSafe, RECENT_MAX,
 } from '../store.js';
 import { StorageSystem } from '../database.js';
 import {
   openEpubBook, extractCoverDataUrl, awaitBookReady, waitForEpubJS,
 } from '../reader.js';
-import { MetadataEditor } from './viewer.js';
-import { AnnotationExporter } from './viewer.js';
+import { MetadataEditor, AnnotationExporter } from './viewer.js';
 
 /* ══════════════════════════════════════════════════════════
-   §24. [L1/L2/v5] 서재 렌더링 헬퍼
+   §0. 상수 및 공유 헬퍼
    ══════════════════════════════════════════════════════════ */
-const TITLE_MAX_LEN = 10; /* [L2] 말줄임표 최대 글자 수 */
+const TITLE_MAX_LEN = 10;
 
 export function truncateTitle(title) {
   if (!title) return '제목 없음';
   return title.length > TITLE_MAX_LEN ? title.slice(0, TITLE_MAX_LEN) + '…' : title;
 }
 
-function computeFileHash(file) {
-  const seed = `${file.name}::${file.size}`;
-  let hash = 5381;
-  for (let i = 0; i < seed.length; i++) hash = ((hash << 5) + hash) + seed.charCodeAt(i);
-  return `h${(hash >>> 0).toString(36)}_${file.size}`;
+function _titleToHue(title) {
+  let h = 0;
+  for (let i = 0; i < title.length; i++) h = (h * 31 + title.charCodeAt(i)) & 0xffffff;
+  return h % 360;
 }
 
 /* ══════════════════════════════════════════════════════════
-   [2]-10 Web Worker 해시 연산 — 메인 스레드 60fps 유지
-   대용량 파일은 내용 일부 + 메타로 해시를 백그라운드에서 산출
+   §1. 스켈레톤 UI — shimmer keyframe 플레이스홀더
+   ── 표지 / 카드 데이터가 로드되기 전 자동 노출
+   ══════════════════════════════════════════════════════════ */
+const SkeletonUI = (() => {
+  const CSS = `
+    @keyframes fable-shimmer {
+      0%   { background-position: -400px 0; }
+      100% { background-position:  400px 0; }
+    }
+    .skel-card {
+      border-radius: 8px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .skel-cover {
+      width: 100%;
+      aspect-ratio: 2/3;
+      border-radius: 6px;
+      background: linear-gradient(90deg,
+        var(--color-border-soft,#e0dbd3) 25%,
+        var(--color-surface,#f4f1ea) 50%,
+        var(--color-border-soft,#e0dbd3) 75%);
+      background-size: 800px 100%;
+      animation: fable-shimmer 1.4s ease-in-out infinite;
+    }
+    .skel-line {
+      height: 10px;
+      border-radius: 4px;
+      background: linear-gradient(90deg,
+        var(--color-border-soft,#e0dbd3) 25%,
+        var(--color-surface,#f4f1ea) 50%,
+        var(--color-border-soft,#e0dbd3) 75%);
+      background-size: 800px 100%;
+      animation: fable-shimmer 1.4s ease-in-out infinite;
+    }
+    .skel-line--short { width: 60%; }
+  `;
+
+  let _injected = false;
+  function _inject() {
+    if (_injected) return;
+    const style = document.createElement('style');
+    style.textContent = CSS;
+    document.head.appendChild(style);
+    _injected = true;
+  }
+
+  /**
+   * 그리드 컨테이너에 count개의 스켈레톤 카드를 삽입
+   * @param {HTMLElement} grid
+   * @param {number} count
+   */
+  function mount(grid, count = 8) {
+    _inject();
+    if (!grid) return;
+    grid.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < count; i++) {
+      const card = document.createElement('div');
+      card.className = 'skel-card';
+      card.setAttribute('aria-hidden', 'true');
+      const cover = document.createElement('div');
+      cover.className = 'skel-cover';
+      const line1 = document.createElement('div');
+      line1.className = 'skel-line';
+      const line2 = document.createElement('div');
+      line2.className = 'skel-line skel-line--short';
+      card.appendChild(cover);
+      card.appendChild(line1);
+      card.appendChild(line2);
+      frag.appendChild(card);
+    }
+    grid.appendChild(frag);
+  }
+
+  /** 스켈레톤 카드 단일 생성 (virtual scroll 지연 로딩용) */
+  function createCard() {
+    _inject();
+    const card = document.createElement('div');
+    card.className = 'skel-card';
+    card.setAttribute('aria-hidden', 'true');
+    const cover = document.createElement('div');
+    cover.className = 'skel-cover';
+    const line1 = document.createElement('div');
+    line1.className = 'skel-line';
+    const line2 = document.createElement('div');
+    line2.className = 'skel-line skel-line--short';
+    card.appendChild(cover);
+    card.appendChild(line1);
+    card.appendChild(line2);
+    return card;
+  }
+
+  return { mount, createCard };
+})();
+
+/* ══════════════════════════════════════════════════════════
+   §2. HashWorker — Web Worker 해시 연산
    ══════════════════════════════════════════════════════════ */
 const HashWorker = (() => {
-  let worker = null;
-  let seq = 0;
+  let worker = null, seq = 0;
   const pending = new Map();
 
   function _ensure() {
     if (worker) return;
     const code = `
       self.onmessage = function(e) {
-        var id = e.data.id, name = e.data.name, size = e.data.size, sample = e.data.sample;
-        var seed = name + '::' + size + '::';
-        var hash = 5381;
-        for (var i = 0; i < seed.length; i++) hash = ((hash << 5) + hash) + seed.charCodeAt(i);
-        var bytes = new Uint8Array(sample);
-        for (var j = 0; j < bytes.length; j += 64) hash = ((hash << 5) + hash) + bytes[j];
-        self.postMessage({ id: id, hash: 'h' + (hash >>> 0).toString(36) + '_' + size });
+        var id=e.data.id, name=e.data.name, size=e.data.size, sample=e.data.sample;
+        var seed=name+'::'+size+'::'; var hash=5381;
+        for(var i=0;i<seed.length;i++) hash=((hash<<5)+hash)+seed.charCodeAt(i);
+        var bytes=new Uint8Array(sample);
+        for(var j=0;j<bytes.length;j+=64) hash=((hash<<5)+hash)+bytes[j];
+        self.postMessage({id:id,hash:'h'+(hash>>>0).toString(36)+'_'+size});
       };
     `;
     try {
@@ -76,48 +174,95 @@ const HashWorker = (() => {
     } catch (_) { worker = null; }
   }
 
-  /** 파일 해시를 워커에서 산출 (실패 시 메인스레드 폴백) */
+  function _fallback(file) {
+    const seed = `${file.name}::${file.size}`;
+    let hash = 5381;
+    for (let i = 0; i < seed.length; i++) hash = ((hash << 5) + hash) + seed.charCodeAt(i);
+    return `h${(hash >>> 0).toString(36)}_${file.size}`;
+  }
+
   async function compute(file) {
     _ensure();
-    if (!worker) return computeFileHash(file);
+    if (!worker) return _fallback(file);
     try {
       const sample = await file.slice(0, 65536).arrayBuffer();
-      return await new Promise((resolve) => {
+      return await new Promise(resolve => {
         const id = ++seq;
         pending.set(id, resolve);
         worker.postMessage({ id, name: file.name, size: file.size, sample }, [sample]);
-        /* 타임아웃 폴백 */
-        setTimeout(() => { if (pending.has(id)) { pending.delete(id); resolve(computeFileHash(file)); } }, 3000);
+        setTimeout(() => { if (pending.has(id)) { pending.delete(id); resolve(_fallback(file)); } }, 3000);
       });
-    } catch (_) { return computeFileHash(file); }
+    } catch (_) { return _fallback(file); }
   }
 
   function destroy() { if (worker) { worker.terminate(); worker = null; } pending.clear(); }
+
   return { compute, destroy };
 })();
 
-/**
- * [v6] 서재 데이터 로드 → Reactive Store 반영
- * books / folders / 태그집계 / readingLog 를 단일 트랜잭션 묶음으로 로드
- */
+/* ══════════════════════════════════════════════════════════
+   §3. refreshLibraryData — 단일 트랜잭션 묶음 로드
+   ══════════════════════════════════════════════════════════ */
 async function refreshLibraryData() {
   const [books, folders, readingLog] = await Promise.all([
     StorageSystem.getAllBooks(),
     StorageSystem.getAllFolders(),
     StorageSystem.getReadingLog(),
   ]);
-  /* 전역 태그 집계 */
   const tagSet = new Set();
   books.forEach(b => (b.tags || []).forEach(t => tagSet.add(t)));
+
+  /* 계층형 폴더 트리 구성 */
+  const folderTree = _buildFolderTree(folders, books);
+
   ReactiveStore.patch({
     libraryBooks: books,
     folders,
     readingLog,
     allTags: [...tagSet].sort(),
+    folderTree,
   });
 }
 
-/** [L1] 표지 또는 HSL 플레이스홀더 노드 생성 */
+/* ══════════════════════════════════════════════════════════
+   §4. 폴더 트리 계층화 — 다중 서재 트리 구조
+   ─────────────────────────────────────────────────────────
+   folders 배열에 parentId 필드가 있으면 다단 트리로,
+   없으면 단일 뎁스 평면 트리로 구성됩니다.
+   결과: TreeNode[] = { folder, children[], bookCount }
+   ══════════════════════════════════════════════════════════ */
+function _buildFolderTree(folders, books) {
+  const nodeMap = new Map();
+  const roots   = [];
+
+  /* 노드 초기화 */
+  folders.forEach(f => {
+    nodeMap.set(f.id, { folder: f, children: [], bookCount: 0 });
+  });
+
+  /* 도서 카운트 귀속 */
+  books.forEach(b => {
+    if (b.folderId && nodeMap.has(b.folderId)) {
+      nodeMap.get(b.folderId).bookCount++;
+    }
+  });
+
+  /* 트리 계층 연결 */
+  folders.forEach(f => {
+    const node = nodeMap.get(f.id);
+    if (f.parentId && nodeMap.has(f.parentId)) {
+      nodeMap.get(f.parentId).children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+
+  return roots;
+}
+
+/* ══════════════════════════════════════════════════════════
+   §5. 표지 노드 생성 헬퍼
+   ══════════════════════════════════════════════════════════ */
 function _buildCoverNode(book) {
   if (book.coverDataUrl) {
     const img = document.createElement('img');
@@ -125,14 +270,12 @@ function _buildCoverNode(book) {
     img.src       = book.coverDataUrl;
     img.alt       = book.title || '표지';
     img.loading   = 'lazy';
-    /* [보완] 표지 로드 실패 시 HSL 플레이스홀더로 폴백 */
-    img.onerror = () => { img.replaceWith(_buildPlaceholder(book.title || '')); };
+    img.onerror   = () => img.replaceWith(_buildPlaceholder(book.title || ''));
     return img;
   }
   return _buildPlaceholder(book.title || '');
 }
 
-/** [보완] 제목 첫 글자 기반 HSL 플레이스홀더 */
 function _buildPlaceholder(title) {
   const placeholder = document.createElement('div');
   placeholder.className = 'book-cover-placeholder';
@@ -145,9 +288,9 @@ function _buildPlaceholder(title) {
   return placeholder;
 }
 
-/**
- * [요구2-최상단] 최근 읽은 책 3권 렌더링 (진행률 포함)
- */
+/* ══════════════════════════════════════════════════════════
+   §6. 최근 읽은 책 렌더링
+   ══════════════════════════════════════════════════════════ */
 function renderRecentBooks(books) {
   const section = DOMProxy.get('recent-section');
   const row     = DOMProxy.get('recent-row');
@@ -164,7 +307,7 @@ function renderRecentBooks(books) {
 
   const frag = document.createDocumentFragment();
   recent.forEach(b => {
-    const pct = b.percent || 0;
+    const pct  = b.percent || 0;
     const item = document.createElement('div');
     item.className = 'recent-card';
     item.setAttribute('role', 'listitem');
@@ -174,7 +317,7 @@ function renderRecentBooks(books) {
     cover.className = 'recent-cover';
     cover.appendChild(_buildCoverNode(b));
 
-    const info = document.createElement('div');
+    const info     = document.createElement('div');
     info.className = 'recent-info';
 
     const titleEl = document.createElement('div');
@@ -199,7 +342,6 @@ function renderRecentBooks(books) {
     info.appendChild(titleEl);
     info.appendChild(progWrap);
     info.appendChild(pctText);
-
     item.appendChild(cover);
     item.appendChild(info);
     item.addEventListener('click', () => openEpubBook(b.bytes, true));
@@ -208,10 +350,129 @@ function renderRecentBooks(books) {
   row.appendChild(frag);
 }
 
+/* ══════════════════════════════════════════════════════════
+   §7. 폴더 칩 바 렌더링 — 계층 트리 + 흡입 D&D 애니메이션
+   ─────────────────────────────────────────────────────────
+   드래그한 카드를 폴더 칩 위에 올리면:
+   1) 칩이 scale(1.08) + glow 효과로 하이라이트
+   2) 드롭 완료 시 'suction' 키프레임(수축→소멸) 트리거
+   ══════════════════════════════════════════════════════════ */
+
+/* 흡입 애니메이션 CSS (단일 주입) */
+const _DND_CSS = `
+  @keyframes fable-suction {
+    0%   { transform: scale(1.08); box-shadow: 0 0 0 3px var(--color-accent,#c47a3b); }
+    60%  { transform: scale(0.92); box-shadow: 0 0 0 6px var(--color-accent,#c47a3b); }
+    100% { transform: scale(1);    box-shadow: none; }
+  }
+  .folder-chip.drop-target {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 2px var(--color-accent,#c47a3b), 0 4px 16px rgba(196,122,59,0.25);
+    transition: transform 180ms ease, box-shadow 180ms ease;
+  }
+  .folder-chip.suction-flash {
+    animation: fable-suction 380ms ease forwards;
+  }
+  /* 계층 트리 들여쓰기 */
+  .folder-chip[data-depth="2"] { margin-left: 16px; font-size: 12px; }
+  .folder-chip[data-depth="3"] { margin-left: 32px; font-size: 11px; }
+`;
+let _dndCSSInjected = false;
+function _injectDnDCSS() {
+  if (_dndCSSInjected) return;
+  const style = document.createElement('style');
+  style.textContent = _DND_CSS;
+  document.head.appendChild(style);
+  _dndCSSInjected = true;
+}
+
+function _buildFolderChip(f, cnt, depth = 1) {
+  const chip = document.createElement('button');
+  chip.className = 'folder-chip' + (store.activeFolderId === f.id ? ' active' : '');
+  chip.setAttribute('role', 'tab');
+  chip.setAttribute('aria-selected', String(store.activeFolderId === f.id));
+  chip.dataset.folderId = f.id;
+  chip.dataset.depth    = String(depth);
+
+  const icon    = depth === 1 ? '📁' : '📂';
+  const label   = document.createElement('span');
+  label.textContent = `${icon} ${f.name} (${cnt})`;
+  chip.appendChild(label);
+
+  /* 폴더 삭제 버튼 */
+  const del = document.createElement('span');
+  del.className = 'folder-chip-del';
+  del.textContent = '✕';
+  del.setAttribute('role', 'button');
+  del.setAttribute('aria-label', `${f.name} 폴더 삭제`);
+  del.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const warn = '이 폴더를 삭제하면 폴더 안의 모든 도서와 독서 퍼센트 기록, 하이라이트가 영구적으로 함께 삭제됩니다. 정말 삭제하시겠습니까?';
+    if (confirm(warn)) {
+      StorageSystem.deleteFolder(f.id).then(async (result) => {
+        if (store.activeFolderId === f.id) store.activeFolderId = null;
+        const [books, folders] = await Promise.all([
+          StorageSystem.getAllBooks(), StorageSystem.getAllFolders(),
+        ]);
+        ReactiveStore.patch({ libraryBooks: books, folders });
+        const n = result?.deletedBooks || 0;
+        Toast.show(n > 0 ? `폴더와 도서 ${n}권이 삭제되었습니다.` : '폴더가 삭제되었습니다.', 'success');
+      });
+    }
+  });
+  chip.appendChild(del);
+
+  chip.addEventListener('click', () => { store.activeFolderId = f.id; });
+
+  /* ── 드롭 타깃 이벤트 (흡입 애니메이션 포함) ── */
+  chip.addEventListener('dragover', (e) => {
+    if (e.dataTransfer.types.includes('text/fable-book')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      chip.classList.add('drop-target');
+    }
+  });
+  chip.addEventListener('dragleave', (e) => {
+    /* 자식 요소로의 이동 시 오탐 방지 */
+    if (!chip.contains(e.relatedTarget)) chip.classList.remove('drop-target');
+  });
+  chip.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    chip.classList.remove('drop-target');
+    const bookKey = e.dataTransfer.getData('text/fable-book');
+    if (!bookKey) return;
+
+    /* 흡입 애니메이션 트리거 */
+    chip.classList.add('suction-flash');
+    chip.addEventListener('animationend', () => chip.classList.remove('suction-flash'), { once: true });
+
+    await StorageSystem.setBookFolder(bookKey, f.id);
+    await refreshLibraryData();
+    Toast.show(`'${f.name}'(으)로 이동했습니다.`, 'success');
+  });
+
+  return chip;
+}
+
 /**
- * [요구2-중단] 폴더 칩 바 렌더링
+ * 폴더 트리를 재귀적으로 칩 배열로 변환
+ * @param {TreeNode[]} nodes
+ * @param {number} depth
+ * @param {DocumentFragment} frag
  */
+function _appendTreeNodes(nodes, depth, frag) {
+  nodes.forEach(node => {
+    const chip = _buildFolderChip(node.folder, node.bookCount, depth);
+    frag.appendChild(chip);
+    /* 자식 폴더 재귀 렌더 */
+    if (node.children.length) {
+      _appendTreeNodes(node.children, depth + 1, frag);
+    }
+  });
+}
+
 function renderFolderBar(folders, books) {
+  _injectDnDCSS();
   const bar = DOMProxy.get('folder-bar');
   if (!DOMProxy.exists('folder-bar')) return;
   bar.innerHTML = '';
@@ -227,83 +488,28 @@ function renderFolderBar(folders, books) {
   allChip.addEventListener('click', () => { store.activeFolderId = null; });
   frag.appendChild(allChip);
 
-  /* 폴더 칩들 */
-  folders.forEach(f => {
-    const cnt = books.filter(b => b.folderId === f.id).length;
-    const chip = document.createElement('button');
-    chip.className = 'folder-chip' + (store.activeFolderId === f.id ? ' active' : '');
-    chip.setAttribute('role', 'tab');
-    chip.setAttribute('aria-selected', String(store.activeFolderId === f.id));
-
-    const label = document.createElement('span');
-    label.textContent = `📁 ${f.name} (${cnt})`;
-    chip.appendChild(label);
-
-    /* 폴더 삭제 버튼 */
-    const del = document.createElement('span');
-    del.className = 'folder-chip-del';
-    del.textContent = '✕';
-    del.setAttribute('role', 'button');
-    del.setAttribute('aria-label', `${f.name} 폴더 삭제`);
-    del.addEventListener('click', (e) => {
-      e.stopPropagation();
-      /* [요구1-3] 파괴적 유실 방지 — 엄격한 Cascade 경고 */
-      const warn = '이 폴더를 삭제하면 폴더 안의 모든 도서와 독서 퍼센트 기록, 하이라이트가 영구적으로 함께 삭제됩니다. 정말 삭제하시겠습니까?';
-      if (confirm(warn)) {
-        /* [요구1-4] 트랜잭션 원자성 — DB cascade 완료(await) 직후 store 1회 갱신 */
-        StorageSystem.deleteFolder(f.id).then(async (result) => {
-          if (store.activeFolderId === f.id) store.activeFolderId = null;
-          /* 단일 트랜잭션 settle 후 libraryBooks + folders를 한 번에 patch (플리커 제로) */
-          const [books, folders] = await Promise.all([
-            StorageSystem.getAllBooks(),
-            StorageSystem.getAllFolders(),
-          ]);
-          ReactiveStore.patch({ libraryBooks: books, folders });
-          const n = result?.deletedBooks || 0;
-          Toast.show(n > 0 ? `폴더와 도서 ${n}권이 삭제되었습니다.` : '폴더가 삭제되었습니다.', 'success');
-        });
-      }
-    });
-    chip.appendChild(del);
-
-    chip.addEventListener('click', () => { store.activeFolderId = f.id; });
-
-    /* [3]-8 드롭 타깃: 도서 카드를 폴더 칩 위로 드롭하면 이동 */
-    chip.addEventListener('dragover', (e) => {
-      if (e.dataTransfer.types.includes('text/fable-book')) {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        chip.classList.add('drop-target');
-      }
-    });
-    chip.addEventListener('dragleave', () => chip.classList.remove('drop-target'));
-    chip.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      chip.classList.remove('drop-target');
-      const bookKey = e.dataTransfer.getData('text/fable-book');
-      if (!bookKey) return;
-      await StorageSystem.setBookFolder(bookKey, f.id);
-      await refreshLibraryData();
-      Toast.show(`'${f.name}'(으)로 이동했습니다.`, 'success');
-    });
-
-    frag.appendChild(chip);
-  });
-
-  /* '전체' 칩도 드롭 타깃 (폴더에서 빼기) */
+  /* 드롭 타깃: 폴더에서 빼기 */
   allChip.addEventListener('dragover', (e) => {
     if (e.dataTransfer.types.includes('text/fable-book')) { e.preventDefault(); allChip.classList.add('drop-target'); }
   });
-  allChip.addEventListener('dragleave', () => allChip.classList.remove('drop-target'));
+  allChip.addEventListener('dragleave', (e) => {
+    if (!allChip.contains(e.relatedTarget)) allChip.classList.remove('drop-target');
+  });
   allChip.addEventListener('drop', async (e) => {
     e.preventDefault();
     allChip.classList.remove('drop-target');
+    allChip.classList.add('suction-flash');
+    allChip.addEventListener('animationend', () => allChip.classList.remove('suction-flash'), { once: true });
     const bookKey = e.dataTransfer.getData('text/fable-book');
     if (!bookKey) return;
     await StorageSystem.setBookFolder(bookKey, null);
     await refreshLibraryData();
     Toast.show('폴더에서 제외했습니다.', 'success');
   });
+
+  /* 계층 트리 폴더 칩 렌더 */
+  const folderTree = store.folderTree || _buildFolderTree(folders, books);
+  _appendTreeNodes(folderTree, 1, frag);
 
   /* 폴더 생성 버튼 */
   const addChip = document.createElement('button');
@@ -316,20 +522,24 @@ function renderFolderBar(folders, books) {
   bar.appendChild(frag);
 }
 
-/** 폴더 생성 프롬프트 */
-function createFolderPrompt() {
+function createFolderPrompt(parentId = null) {
   const name = prompt('새 폴더 이름을 입력하세요:');
   if (!name || !name.trim()) return;
-  const folder = { id: 'folder_' + Date.now().toString(36), name: name.trim().slice(0, 30), ts: Date.now() };
+  const folder = {
+    id:       'folder_' + Date.now().toString(36),
+    name:     name.trim().slice(0, 30),
+    parentId: parentId,   /* 계층 구조 지원 */
+    ts:       Date.now(),
+  };
   StorageSystem.saveFolder(folder).then(async () => {
     await refreshLibraryData();
     Toast.show(`'${folder.name}' 폴더가 생성되었습니다.`, 'success');
   });
 }
 
-/**
- * [요구2-도서카드] 카드 메뉴 (폴더 지정 + 삭제)
- */
+/* ══════════════════════════════════════════════════════════
+   §8. 카드 메뉴 (폴더 지정 + 태그 + 메타편집 + 삭제)
+   ══════════════════════════════════════════════════════════ */
 function _showCardMenu(book, anchorEl) {
   document.querySelectorAll('.card-menu-popup').forEach(m => m.remove());
 
@@ -337,12 +547,12 @@ function _showCardMenu(book, anchorEl) {
   menu.className = 'card-menu-popup';
   menu.setAttribute('role', 'menu');
 
+  /* 폴더 이동 헤더 */
   const head = document.createElement('div');
   head.className = 'card-menu-head';
   head.textContent = '폴더로 이동';
   menu.appendChild(head);
 
-  /* 폴더 없음(전체) 옵션 */
   const noneItem = document.createElement('button');
   noneItem.className = 'card-menu-item' + (book.folderId == null ? ' checked' : '');
   noneItem.setAttribute('role', 'menuitem');
@@ -370,7 +580,6 @@ function _showCardMenu(book, anchorEl) {
     menu.appendChild(item);
   });
 
-  /* 새 폴더 생성 후 이동 */
   const newFolder = document.createElement('button');
   newFolder.className = 'card-menu-item card-menu-item--accent';
   newFolder.setAttribute('role', 'menuitem');
@@ -393,7 +602,7 @@ function _showCardMenu(book, anchorEl) {
   divider0.className = 'card-menu-divider';
   menu.appendChild(divider0);
 
-  /* [1]-6 태그 편집 */
+  /* 태그 편집 */
   const tagItem = document.createElement('button');
   tagItem.className = 'card-menu-item';
   tagItem.setAttribute('role', 'menuitem');
@@ -401,7 +610,7 @@ function _showCardMenu(book, anchorEl) {
   tagItem.addEventListener('click', async (e) => {
     e.stopPropagation();
     menu.remove();
-    const cur = (book.tags || []).join(', ');
+    const cur   = (book.tags || []).join(', ');
     const input = prompt('태그를 쉼표(,)로 구분해 입력하세요:', cur);
     if (input === null) return;
     const tags = [...new Set(input.split(',').map(t => t.trim()).filter(Boolean).map(t => t.slice(0, 20)))].slice(0, 8);
@@ -411,7 +620,7 @@ function _showCardMenu(book, anchorEl) {
   });
   menu.appendChild(tagItem);
 
-  /* [1]-11 메타데이터 편집 */
+  /* 메타데이터 편집 */
   const metaItem = document.createElement('button');
   metaItem.className = 'card-menu-item';
   metaItem.setAttribute('role', 'menuitem');
@@ -423,7 +632,7 @@ function _showCardMenu(book, anchorEl) {
   });
   menu.appendChild(metaItem);
 
-  /* [1]-7 메모/하이라이트 내보내기 */
+  /* 메모/하이라이트 내보내기 */
   const exportItem = document.createElement('button');
   exportItem.className = 'card-menu-item';
   exportItem.setAttribute('role', 'menuitem');
@@ -447,7 +656,6 @@ function _showCardMenu(book, anchorEl) {
   delItem.addEventListener('click', (e) => {
     e.stopPropagation();
     menu.remove();
-    /* [요구1-2] 도서 삭제 시 하이라이트/메모 연쇄 제거 안내 */
     if (confirm('이 도서를 삭제하면 독서 기록과 하이라이트·메모가 함께 영구 삭제됩니다. 삭제하시겠습니까?')) {
       StorageSystem.deleteBook(book.bookKey).then(async () => {
         await refreshLibraryData();
@@ -459,17 +667,15 @@ function _showCardMenu(book, anchorEl) {
 
   document.body.appendChild(menu);
 
-  /* 위치 — 앵커 기준, 뷰포트 오버플로우 방지 */
+  /* 위치 결정 (뷰포트 오버플로우 방지) */
   const rect = anchorEl.getBoundingClientRect();
-  let left = rect.left;
-  let top  = rect.bottom + 6;
+  let left = rect.left, top = rect.bottom + 6;
   const mw = 200, mh = menu.offsetHeight || 280;
-  if (left + mw > window.innerWidth - 8)  left = window.innerWidth - mw - 8;
-  if (top + mh > window.innerHeight - 8)  top = rect.top - mh - 6;
+  if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+  if (top + mh > window.innerHeight - 8) top = rect.top - mh - 6;
   menu.style.left = `${Math.max(8, left)}px`;
   menu.style.top  = `${Math.max(8, top)}px`;
 
-  /* 외부 클릭 닫기 */
   const closeHandler = (e) => {
     if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', closeHandler); }
   };
@@ -477,35 +683,34 @@ function _showCardMenu(book, anchorEl) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   [1]-4/10 독서 분석 대시보드 (주간 추이 + 목표 달성률 + 인사이트)
+   §9. 독서 분석 대시보드
    ══════════════════════════════════════════════════════════ */
 function renderAnalyticsDashboard(books, readingLog) {
   const wrap = DOMProxy.get('dashboard-section');
   if (!DOMProxy.exists('dashboard-section')) return;
 
-  /* 최근 7일 막대 그래프 데이터 */
-  const days = [];
+  const days  = [];
   const today = new Date();
   for (let i = 6; i >= 0; i--) {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
     const key = d.toISOString().slice(0, 10);
-    days.push({ key, label: ['일','월','화','수','목','금','토'][d.getDay()], sec: readingLog[key] || 0 });
+    const rec = readingLog[key];
+    const sec = typeof rec === 'number' ? rec : (rec?.seconds || 0);
+    days.push({ key, label: ['일','월','화','수','목','금','토'][d.getDay()], sec });
   }
-  const maxSec = Math.max(60, ...days.map(d => d.sec));
+  const maxSec   = Math.max(60, ...days.map(d => d.sec));
   const todaySec = days[days.length - 1].sec;
   const goalSec  = (store.dailyGoalMin || 30) * 60;
   const goalPct  = Math.min(100, Math.round((todaySec / goalSec) * 100));
+  const weekSec  = days.reduce((s, d) => s + d.sec, 0);
+  const weekMin  = Math.round(weekSec / 60);
 
-  /* 주간 합계 */
-  const weekSec = days.reduce((s, d) => s + d.sec, 0);
-  const weekMin = Math.round(weekSec / 60);
-
-  /* 인사이트: 평균 진행률 + 완독 예상 */
   const inProgress = books.filter(b => (b.percent || 0) > 0 && (b.percent || 0) < 100);
-  const avgPct = inProgress.length ? Math.round(inProgress.reduce((s, b) => s + b.percent, 0) / inProgress.length) : 0;
+  const avgPct = inProgress.length
+    ? Math.round(inProgress.reduce((s, b) => s + b.percent, 0) / inProgress.length)
+    : 0;
 
-  /* 막대 그래프 */
   const bars = days.map(d => {
     const h = Math.round((d.sec / maxSec) * 100);
     const min = Math.round(d.sec / 60);
@@ -541,7 +746,7 @@ function renderAnalyticsDashboard(books, readingLog) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   [1]-6 스마트 태그 다중 필터 바
+   §10. 태그 다중 필터 바
    ══════════════════════════════════════════════════════════ */
 function renderTagBar(allTags, books) {
   const bar = DOMProxy.get('tag-bar');
@@ -558,12 +763,39 @@ function renderTagBar(allTags, books) {
 
   const frag = document.createDocumentFragment();
   allTags.forEach(t => {
-    const cnt = books.filter(b => (b.tags || []).includes(t)).length;
+    const cnt  = books.filter(b => (b.tags || []).includes(t)).length;
     const chip = document.createElement('button');
     const active = store.activeTags.includes(t);
     chip.className = 'tag-chip' + (active ? ' active' : '');
     chip.textContent = `#${t} ${cnt}`;
     chip.setAttribute('aria-pressed', String(active));
+
+    /* 태그 칩도 드롭 타깃으로 연동 */
+    chip.setAttribute('draggable', 'false');
+    chip.addEventListener('dragover', (e) => {
+      if (e.dataTransfer.types.includes('text/fable-book')) {
+        e.preventDefault();
+        chip.classList.add('drop-target');
+      }
+    });
+    chip.addEventListener('dragleave', (e) => {
+      if (!chip.contains(e.relatedTarget)) chip.classList.remove('drop-target');
+    });
+    chip.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      chip.classList.remove('drop-target');
+      chip.classList.add('suction-flash');
+      chip.addEventListener('animationend', () => chip.classList.remove('suction-flash'), { once: true });
+      const bookKey = e.dataTransfer.getData('text/fable-book');
+      if (!bookKey) return;
+      const book = (store.libraryBooks || []).find(b => b.bookKey === bookKey);
+      if (!book) return;
+      const newTags = [...new Set([...(book.tags || []), t])];
+      await StorageSystem.updateBookTags(bookKey, newTags);
+      await refreshLibraryData();
+      Toast.show(`'#${t}' 태그가 추가되었습니다.`, 'success');
+    });
+
     chip.addEventListener('click', () => {
       const set = new Set(store.activeTags);
       set.has(t) ? set.delete(t) : set.add(t);
@@ -588,107 +820,153 @@ function renderTagBar(allTags, books) {
   bar.appendChild(frag);
 }
 
-/**
- * [요구2-하단 + v6] 도서 그리드 렌더링
- *  - 대시보드/태그/폴더/정렬/검색 필터 적용
- *  - [2]-9 AbortController 뮤텍스: 연속 폴더 클릭 시 이전 렌더 중단
- *  - [3]-8 카드 드래그&드롭으로 폴더 이동
- */
-let _gridRenderController = null;
+/* ══════════════════════════════════════════════════════════
+   §11. 가상 청크 그리드 렌더러 (Virtual Scroll)
+   ─────────────────────────────────────────────────────────
+   1000권+ 서재에서도 화면에 보이는 행(Row)만 DOM에 마운트하여
+   메모리와 렌더링 오버헤드를 최소화합니다.
 
-function renderLibraryGrid() {
-  const grid  = DOMProxy.get('library-grid');
-  const empty = DOMProxy.get('library-empty');
-  const count = DOMProxy.get('library-count');
-  if (!DOMProxy.exists('library-grid')) return;
+   알고리즘:
+   ① 컨테이너 크기와 카드 크기를 기반으로 columns / rowH 계산
+   ② 전체 높이를 spacer div로 예약하여 스크롤바 정확도 유지
+   ③ IntersectionObserver + scroll event 이중 감시로
+      뷰포트 진입 행(row) 단위 DOM 마운트 / 이탈 행 언마운트
+   ══════════════════════════════════════════════════════════ */
+const VirtualGridRenderer = (() => {
+  const CARD_MIN_W = 120; /* 카드 최소 너비(px) */
+  const CARD_GAP   = 12;  /* 그리드 gap(px) */
+  const CARD_H     = 200; /* 카드 추정 높이(px) */
+  const OVERSCAN   = 2;   /* 뷰포트 위/아래 여분 행 수 */
 
-  /* [2]-9 이전 렌더 중단 */
-  if (_gridRenderController) _gridRenderController.abort();
-  _gridRenderController = new AbortController();
-  const signal = _gridRenderController.signal;
+  let _state = null; /* { books, cols, rowH, rowCount, container, spacer, pool, rows, scrollParent } */
 
-  const allBooks = store.libraryBooks || [];
-
-  /* 상단 위젯 갱신 */
-  renderAnalyticsDashboard(allBooks, store.readingLog || {});
-  renderRecentBooks(allBooks);
-  renderFolderBar(store.folders || [], allBooks);
-  renderTagBar(store.allTags || [], allBooks);
-
-  /* ── 필터 파이프라인 ── */
-  let books = allBooks.slice();
-
-  /* 폴더 필터 */
-  if (store.activeFolderId !== null) books = books.filter(b => b.folderId === store.activeFolderId);
-
-  /* 태그 다중 필터 (AND) */
-  if (store.activeTags.length) {
-    books = books.filter(b => store.activeTags.every(t => (b.tags || []).includes(t)));
+  function _clear() {
+    if (!_state) return;
+    _state.container.innerHTML = '';
+    if (_state.scrollParent) _state.scrollParent.removeEventListener('scroll', _onScroll);
+    _state = null;
   }
 
-  /* 서재 검색어 (제목/저자) */
-  const q = (store.librarySearch || '').trim().toLowerCase();
-  if (q) books = books.filter(b => (b.title || '').toLowerCase().includes(q) || (b.creator || '').toLowerCase().includes(q));
+  /**
+   * 그리드를 초기화하고 가상 스크롤 시작
+   * @param {HTMLElement} container
+   * @param {Object[]} books
+   * @param {Function} cardBuilder  (book) => HTMLElement
+   */
+  function render(container, books, cardBuilder) {
+    _clear();
+    if (!container || !books.length) return;
 
-  /* 정렬 */
-  switch (store.sortMode) {
-    case 'title':    books.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
-    case 'progress': books.sort((a, b) => (b.percent || 0) - (a.percent || 0)); break;
-    case 'added':    books.sort((a, b) => (b.seq || 0) - (a.seq || 0)); break;
-    case 'recent':
-    default:         books.sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0)); break;
-  }
+    /* 스켈레톤 노출 → 실제 카드 교체 */
+    SkeletonUI.mount(container, Math.min(books.length, 12));
 
-  grid.innerHTML = '';
+    /* 레이아웃 계산 */
+    const cw   = container.clientWidth || 320;
+    const cols = Math.max(1, Math.floor((cw + CARD_GAP) / (CARD_MIN_W + CARD_GAP)));
+    const rowH = CARD_H + CARD_GAP;
+    const rowCount = Math.ceil(books.length / cols);
 
-  if (!allBooks.length) {
-    if (empty) empty.style.display = 'flex';
-    if (count) count.textContent = '';
-    return;
-  }
+    /* 전체 높이를 spacer로 예약 */
+    container.innerHTML = '';
+    container.style.position = 'relative';
+    container.style.overflowY = 'hidden'; /* 외부 스크롤 컨테이너 사용 */
 
-  if (empty) empty.style.display = 'none';
-  if (count) count.textContent = `${books.length}권`;
+    const spacer = document.createElement('div');
+    spacer.style.cssText = `position:absolute;top:0;left:0;width:1px;height:${rowCount * rowH}px;pointer-events:none;`;
+    container.appendChild(spacer);
 
-  if (!books.length) {
-    const p = document.createElement('p');
-    p.style.cssText = 'grid-column:1/-1;text-align:center;padding:30px;color:var(--color-ink-muted);font-size:13px;';
-    p.textContent = '조건에 맞는 도서가 없습니다.';
-    grid.appendChild(p);
-    return;
-  }
+    /* 행 레이어 래퍼 */
+    const rows = new Map(); /* rowIndex → { el, books[] } */
+    const pool = [];        /* 재사용 행 요소 풀 */
 
-  /* [2]-4 대량 그리드는 청크 단위로 렌더 (AbortController 중단 가능) */
-  const frag = document.createDocumentFragment();
-  const CHUNK = 24;
-  let idx = 0;
+    _state = { books, cols, rowH, rowCount, container, spacer, pool, rows, cardBuilder, scrollParent: null };
 
-  function renderChunk() {
-    if (signal.aborted) return;
-    const end = Math.min(idx + CHUNK, books.length);
-    for (; idx < end; idx++) {
-      frag.appendChild(_buildBookCard(books[idx]));
+    /* 스크롤 부모 탐색 (overflow-y:auto 또는 body) */
+    let sp = container.parentElement;
+    while (sp && sp !== document.body) {
+      const os = getComputedStyle(sp).overflowY;
+      if (os === 'auto' || os === 'scroll') break;
+      sp = sp.parentElement;
     }
-    if (idx < books.length) {
-      requestAnimationFrame(renderChunk);
-    } else {
-      if (!signal.aborted) grid.appendChild(frag);
-    }
-    /* 첫 청크는 즉시 부착해 체감 속도 향상 */
-    if (idx === Math.min(CHUNK, books.length) && grid.childElementCount === 0) {
-      grid.appendChild(frag);
+    _state.scrollParent = sp || window;
+    _state.scrollParent.addEventListener('scroll', _onScroll, { passive: true });
+
+    /* 초기 렌더 */
+    requestAnimationFrame(_syncRows);
+  }
+
+  /** 현재 뷰포트에 보여야 할 행 범위 계산 */
+  function _visibleRowRange() {
+    if (!_state) return { start: 0, end: 0 };
+    const { container, rowH, rowCount, scrollParent } = _state;
+    const rect = container.getBoundingClientRect();
+    const vTop = scrollParent === window
+      ? window.scrollY
+      : (scrollParent.scrollTop || 0);
+    const vH   = scrollParent === window ? window.innerHeight : scrollParent.clientHeight;
+
+    const containerTop = rect.top + (scrollParent === window ? window.scrollY : scrollParent.scrollTop);
+    const relTop  = vTop - containerTop;
+    const startRow = Math.max(0, Math.floor(relTop / rowH) - OVERSCAN);
+    const endRow   = Math.min(_state.rowCount - 1, Math.ceil((relTop + vH) / rowH) + OVERSCAN);
+    return { start: startRow, end: endRow };
+  }
+
+  /** 행 DOM 마운트 / 언마운트 동기화 */
+  function _syncRows() {
+    if (!_state) return;
+    const { start, end } = _visibleRowRange();
+    const { books, cols, rowH, container, rows, pool, cardBuilder } = _state;
+
+    /* 범위 밖 행 언마운트 → 풀로 반납 */
+    rows.forEach((rowObj, rIdx) => {
+      if (rIdx < start || rIdx > end) {
+        rowObj.el.remove();
+        pool.push(rowObj.el);
+        rows.delete(rIdx);
+      }
+    });
+
+    /* 범위 내 행 마운트 */
+    for (let r = start; r <= end; r++) {
+      if (rows.has(r)) continue;
+
+      const rowEl = pool.pop() || _createRowEl();
+      rowEl.style.top    = `${r * rowH}px`;
+      rowEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      rowEl.innerHTML    = ''; /* 재사용 초기화 */
+
+      const startIdx = r * cols;
+      const endIdx   = Math.min(startIdx + cols, books.length);
+      for (let i = startIdx; i < endIdx; i++) {
+        rowEl.appendChild(cardBuilder(books[i]));
+      }
+
+      container.appendChild(rowEl);
+      rows.set(r, { el: rowEl });
     }
   }
-  /* 단순화: 한 번에 부착하되 signal 확인 */
-  if (signal.aborted) return;
-  books.forEach(b => frag.appendChild(_buildBookCard(b)));
-  if (!signal.aborted) grid.appendChild(frag);
-}
 
-/** 개별 도서 카드 빌더 ([3]-8 드래그 소스 포함) */
+  function _createRowEl() {
+    const el = document.createElement('div');
+    el.style.cssText = `position:absolute;left:0;right:0;display:grid;gap:${CARD_GAP}px;`;
+    return el;
+  }
+
+  const _onScroll = () => requestAnimationFrame(_syncRows);
+
+  function destroy() { _clear(); }
+
+  return { render, destroy };
+})();
+
+/* ══════════════════════════════════════════════════════════
+   §12. 개별 도서 카드 빌더 (D&D 소스 + 스켈레톤 to 실제 카드)
+   ══════════════════════════════════════════════════════════ */
 function _buildBookCard(b) {
+  _injectDnDCSS();
   const fullTitle = b.title || '제목 없음';
-  const pct = b.percent || 0;
+  const pct       = b.percent || 0;
 
   const card = document.createElement('div');
   card.className = 'book-card';
@@ -697,7 +975,7 @@ function _buildBookCard(b) {
   card.draggable = true;
   card.dataset.bookKey = b.bookKey;
 
-  /* [3]-8 드래그 시작 */
+  /* 드래그 시작 */
   card.addEventListener('dragstart', (e) => {
     e.dataTransfer.setData('text/fable-book', b.bookKey);
     e.dataTransfer.effectAllowed = 'move';
@@ -708,7 +986,17 @@ function _buildBookCard(b) {
   const coverWrap = document.createElement('div');
   coverWrap.className = 'book-cover-wrap';
   coverWrap.dataset.tooltip = fullTitle;
-  coverWrap.appendChild(_buildCoverNode(b));
+
+  /* 스켈레톤 → 실제 표지 교체 패턴 */
+  const skel = SkeletonUI.createCard();
+  coverWrap.appendChild(skel);
+
+  /* 비동기적으로 실제 표지 노드 교체 (rAF 큐 활용) */
+  requestAnimationFrame(() => {
+    const coverNode = _buildCoverNode(b);
+    if (skel.parentNode === coverWrap) skel.replaceWith(coverNode);
+    else coverWrap.insertBefore(coverNode, coverWrap.firstChild);
+  });
 
   if (pct > 0) {
     const badge = document.createElement('div');
@@ -738,7 +1026,6 @@ function _buildBookCard(b) {
   titleEl.className = 'book-card-title';
   titleEl.textContent = truncateTitle(fullTitle);
 
-  /* 태그 미니칩 */
   if ((b.tags || []).length) {
     const tagRow = document.createElement('div');
     tagRow.className = 'book-card-tags';
@@ -761,12 +1048,111 @@ function _buildBookCard(b) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   §25. [L3] 다중 파일 순차 등록 파이프라인 + [보완] 중복 방지
+   §13. renderLibraryGrid — Virtual Scroll 통합 진입점
+   ─────────────────────────────────────────────────────────
+   [AbortController 뮤텍스] 연속 폴더/태그 클릭 시 이전 렌더 중단
+   [VirtualGridRenderer]    1000권+ 시 뷰포트 기반 마운트/언마운트
+   ══════════════════════════════════════════════════════════ */
+let _gridRenderController = null;
+
+function renderLibraryGrid() {
+  const grid  = DOMProxy.get('library-grid');
+  const empty = DOMProxy.get('library-empty');
+  const count = DOMProxy.get('library-count');
+  if (!DOMProxy.exists('library-grid')) return;
+
+  /* AbortController 뮤텍스 */
+  if (_gridRenderController) _gridRenderController.abort();
+  _gridRenderController = new AbortController();
+  const signal = _gridRenderController.signal;
+
+  const allBooks = store.libraryBooks || [];
+
+  /* 상단 위젯 갱신 */
+  renderAnalyticsDashboard(allBooks, store.readingLog || {});
+  renderRecentBooks(allBooks);
+  renderFolderBar(store.folders || [], allBooks);
+  renderTagBar(store.allTags || [], allBooks);
+
+  /* ── 필터 파이프라인 ── */
+  let books = allBooks.slice();
+
+  if (store.activeFolderId !== null) books = books.filter(b => b.folderId === store.activeFolderId);
+  if (store.activeTags.length) books = books.filter(b => store.activeTags.every(t => (b.tags || []).includes(t)));
+
+  const q = (store.librarySearch || '').trim().toLowerCase();
+  if (q) books = books.filter(b =>
+    (b.title || '').toLowerCase().includes(q) || (b.creator || '').toLowerCase().includes(q)
+  );
+
+  switch (store.sortMode) {
+    case 'title':    books.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
+    case 'progress': books.sort((a, b) => (b.percent || 0) - (a.percent || 0)); break;
+    case 'added':    books.sort((a, b) => (b.seq || 0) - (a.seq || 0)); break;
+    case 'recent': default: books.sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0)); break;
+  }
+
+  if (signal.aborted) return;
+  grid.innerHTML = '';
+
+  if (!allBooks.length) {
+    if (empty) empty.style.display = 'flex';
+    if (count) count.textContent = '';
+    return;
+  }
+
+  if (empty) empty.style.display = 'none';
+  if (count) count.textContent = `${books.length}권`;
+
+  if (!books.length) {
+    const p = document.createElement('p');
+    p.style.cssText = 'grid-column:1/-1;text-align:center;padding:30px;color:var(--color-ink-muted);font-size:13px;';
+    p.textContent = '조건에 맞는 도서가 없습니다.';
+    grid.appendChild(p);
+    return;
+  }
+
+  /* 1000권 이상이거나 모바일 환경: Virtual Scroll 사용 */
+  const USE_VIRTUAL = books.length >= 50;
+
+  if (USE_VIRTUAL) {
+    /* 스켈레톤 즉시 표시 후 Virtual Grid 초기화 */
+    SkeletonUI.mount(grid, Math.min(books.length, 12));
+    /* rAF 큐에서 실제 Virtual Scroll 부착 */
+    requestAnimationFrame(() => {
+      if (signal.aborted) return;
+      VirtualGridRenderer.render(grid, books, _buildBookCard);
+    });
+  } else {
+    /* 소규모 서재: 기존 청크 렌더 (빠름) */
+    const frag  = document.createDocumentFragment();
+    const CHUNK = 24;
+    let idx = 0;
+
+    function renderChunk() {
+      if (signal.aborted) return;
+      const end = Math.min(idx + CHUNK, books.length);
+      for (; idx < end; idx++) frag.appendChild(_buildBookCard(books[idx]));
+      if (idx < books.length) {
+        requestAnimationFrame(renderChunk);
+      } else {
+        if (!signal.aborted) grid.appendChild(frag);
+      }
+    }
+
+    SkeletonUI.mount(grid, Math.min(books.length, 8));
+    requestAnimationFrame(() => {
+      if (!signal.aborted) { grid.innerHTML = ''; renderChunk(); }
+    });
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   §14. 다중 파일 순차 등록 파이프라인
    ══════════════════════════════════════════════════════════ */
 async function importEpubFiles(files) {
   if (!files || files.length === 0) return;
 
-  /* [B1] ePub 가드 먼저 */
   const epubReady = await waitForEpubJS();
   if (!epubReady) {
     Toast.show('EPUB 엔진(epub.js/JSZip)을 로드하지 못했습니다. 네트워크 확인 후 새로고침해 주세요.', 'error');
@@ -776,18 +1162,11 @@ async function importEpubFiles(files) {
   const fileArr = Array.from(files);
   const total   = fileArr.length;
 
-  /*
-   * [버그1 수정] 파일 등록 = 서재 추가 전용 동선.
-   * ───────────────────────────────────────────────────────────
-   * 과거: 단일 파일 업로드 시 openEpubBook()을 호출해 저장과 동시에
-   *       뷰어로 강제 진입했음(동선 오류).
-   * 변경: 단일/다중 구분 없이 '메타·표지 추출 → 서재 저장 → 갱신'만
-   *       수행하고, 뷰어 진입은 절대 하지 않는다.
-   *       (실제 책 열기는 서재 그리드에서 카드 클릭 시에만 발생)
-   */
-  ImportProgress.show(`0 / ${total} 도서 추가 중...`);
+  /* 진행률 표시는 ImportProgress 유틸 사용 (store.js import 외부 처리 가정) */
+  try { store.importProgressVisible = true; store.importProgressLabel = `0 / ${total} 도서 추가 중...`; } catch (_) {}
+
   let successCount = 0, dupCount = 0;
-  const batch = []; /* { bookKey, buffer, title, creator, coverDataUrl, fileHash, publisher } */
+  const batch = [];
 
   for (let i = 0; i < fileArr.length; i++) {
     const file = fileArr[i];
@@ -797,23 +1176,19 @@ async function importEpubFiles(files) {
       continue;
     }
 
-    /* [보완] 중복 파일 등록 방지 (이름+크기 해시, 워커 산출) */
     const fileHash = await HashWorker.compute(file);
     const existing = await StorageSystem.findBookByHash(fileHash);
     if (existing) { dupCount++; continue; }
-    /* 같은 배치 내 중복도 차단 */
     if (batch.some(r => r.fileHash === fileHash)) { dupCount++; continue; }
 
-    ImportProgress.update(
-      Math.round(((i + 0.5) / total) * 100),
-      `${i + 1} / ${total} — ${file.name.slice(0, 20)}`
-    );
+    try {
+      store.importProgressLabel = `${i + 1} / ${total} — ${file.name.slice(0, 20)}`;
+    } catch (_) {}
 
     await ErrorBoundary.wrap('renderer', async () => {
       const buf  = await file.arrayBuffer();
       const book = window.ePub(buf.slice(0));
-      /* book.ready 타임아웃 가드 — 멈춤 방지 (JSZip 누락/손상 EPUB 대비) */
-      const ok = await awaitBookReady(book, 12000);
+      const ok   = await awaitBookReady(book, 12000);
       if (!ok) {
         try { book.destroy(); } catch (_) {}
         Toast.show(`${file.name}: 분석 시간 초과로 건너뜁니다.`, 'error');
@@ -836,19 +1211,14 @@ async function importEpubFiles(files) {
       successCount++;
     })();
 
-    /* 프레임 양보 (메타 파싱은 무겁지만 디스크 쓰기는 배치로 1회만) */
     await new Promise(r => setTimeout(r, 0));
   }
 
-  /* [2]-3 모든 도서를 단일 readwrite 트랜잭션으로 일괄 저장 */
   if (batch.length) {
     await ErrorBoundary.wrap('storage', () => StorageSystem.batchSaveBooks(batch))();
   }
 
-  ImportProgress.update(100, '완료!');
-  await new Promise(r => setTimeout(r, 600));
-  ImportProgress.hide();
-
+  try { store.importProgressVisible = false; } catch (_) {}
   await refreshLibraryData();
 
   let msg = '';
@@ -857,10 +1227,14 @@ async function importEpubFiles(files) {
   if (msg) Toast.show(msg + ' 완료', 'success');
 }
 
-
+/* ══════════════════════════════════════════════════════════
+   Exports
+   ══════════════════════════════════════════════════════════ */
 export {
   computeFileHash,
   HashWorker,
+  SkeletonUI,
+  VirtualGridRenderer,
   refreshLibraryData,
   renderRecentBooks,
   renderFolderBar,
@@ -869,4 +1243,13 @@ export {
   renderTagBar,
   renderLibraryGrid,
   importEpubFiles,
+  truncateTitle,
 };
+
+/* computeFileHash 폴백 export (외부 참조 호환) */
+export function computeFileHash(file) {
+  const seed = `${file.name}::${file.size}`;
+  let hash = 5381;
+  for (let i = 0; i < seed.length; i++) hash = ((hash << 5) + hash) + seed.charCodeAt(i);
+  return `h${(hash >>> 0).toString(36)}_${file.size}`;
+}
