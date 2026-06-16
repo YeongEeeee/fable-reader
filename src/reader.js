@@ -1,5 +1,5 @@
 /**
- * src/reader.js  ── Fable Premium v4.0
+ * src/reader.js  ── Fable Premium v4.1
  * ─────────────────────────────────────────────────────────────────
  * EpubReader 샌드박스 바인딩 + jszip/epubjs 런타임 가드 레이어
  *
@@ -15,6 +15,11 @@
  *   [3D 전환] fade | slide | flip3d 옵션
  *   [이미지] 다크 모드 35% 드롭 스마트 필터
  *   [E-Ink] fontWeightBoost / contrastScale 강제 보정 레이어
+ *
+ * [버그 수정 v4.1]
+ *   allowScriptedContent: true — iframe sandbox 'allow-scripts' 명시 부여
+ *   → "Et.start is not a function" TypeError 크래시 해결
+ *   → "Blocked script execution in 'about:srcdoc'" 차단 해제
  *
  * ※ 순환 의존성 차단:
  *   UI 계층(서재 렌더, 통계, 검색, 주석 등) 콜백은 registerReaderDeps()로
@@ -87,8 +92,6 @@ export function registerReaderDeps(overrides) {
    ══════════════════════════════════════════════════════════════════ */
 let _epubRuntimePromise = null;
 
-/* 마지막 안전망: 정적 import가 어떤 이유로든 전역을 주입하지 못한
-   극단적 환경에서, CDN UMD 스크립트를 주입해 window 전역을 복구한다. */
 function _loadScript(src) {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
@@ -100,7 +103,6 @@ function _loadScript(src) {
 }
 
 async function _cdnFallback() {
-  /* JSZip → epub.js 순서 보장 (UMD 의존성) */
   if (typeof window.JSZip !== 'function') {
     try { await _loadScript('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'); }
     catch (_) { try { await _loadScript('https://unpkg.com/jszip@3.10.1/dist/jszip.min.js'); } catch (_) {} }
@@ -115,12 +117,10 @@ export function ensureEpubRuntime() {
   if (_epubRuntimePromise) return _epubRuntimePromise;
   _epubRuntimePromise = (async () => {
     try {
-      /* 1차: 정적 import가 이미 전역을 주입했는지 확인 */
       if (typeof window.JSZip !== 'function' && JSZipLib)
         window.JSZip = JSZipLib.default || JSZipLib;
       if (typeof window.ePub !== 'function' && ePubLib)
         window.ePub = ePubLib.default || ePubLib;
-      /* 2차: 그래도 없으면 CDN 폴백 */
       if (!isEpubRuntimeReady()) await _cdnFallback();
       return isEpubRuntimeReady();
     } catch (err) {
@@ -142,8 +142,8 @@ export async function waitForEpubJS(maxWaitMs = 3000) {
   return new Promise((resolve) => {
     const start    = Date.now();
     const interval = setInterval(() => {
-      if (isEpubRuntimeReady())           { clearInterval(interval); resolve(true);  return; }
-      if (Date.now() - start >= maxWaitMs){ clearInterval(interval); resolve(false); }
+      if (isEpubRuntimeReady())            { clearInterval(interval); resolve(true);  return; }
+      if (Date.now() - start >= maxWaitMs) { clearInterval(interval); resolve(false); }
     }, 50);
   });
 }
@@ -161,7 +161,7 @@ export function awaitBookReady(book, ms = 12000) {
    — 타임아웃 시 false 반환 → 호출부에서 시스템 기본 서체로 폴백
    ══════════════════════════════════════════════════════════════════ */
 export async function waitForFontsWithTimeout(family, ms = 1500) {
-  if (!document.fonts?.load) return true;  /* API 미지원 환경 — 폴백 허용 */
+  if (!document.fonts?.load) return true;
   try {
     return await Promise.race([
       document.fonts.load(`16px ${family}`).then(() => true),
@@ -201,29 +201,15 @@ export const CFICache = (() => {
    매칭·메모이제이션하여 문맥 유실을 원천 차단
    ══════════════════════════════════════════════════════════════════ */
 const CFIPrecisionGuard = (() => {
-  let _observer     = null;
+  let _observer      = null;
   let _lastCenterCfi = '';
 
-  /**
-   * init(): IntersectionObserver를 뷰포트 기준으로 초기화
-   * iframe 내부 단락을 직접 관찰할 수 없으므로,
-   * 리사이즈 이벤트 시 snapCenterCfi()를 명시적으로 호출하는 구조를 사용
-   */
   function init() {
     if (_observer) return;
     if (typeof IntersectionObserver === 'undefined') return;
-    /* epub.js iframe sandbox 제약으로 iframe 내부 요소를
-       부모 컨텍스트의 IntersectionObserver로 직접 observe 불가.
-       → resize 이벤트 후 snapCenterCfi()를 수동 트리거하는 방식 채택.
-       미래 확장 포인트: postMessage 기반 iframe ↔ host 브릿지 추가 가능. */
-    _observer = {};  /* 초기화 완료 마커 */
+    _observer = {};
   }
 
-  /**
-   * snapCenterCfi(): iframe 문서에서 뷰포트 수직 중앙에 가장 가까운
-   * paragraph/heading 요소를 탐색하고, 현재 rendition CFI를 메모이제이션
-   * — 리사이즈 마스크 해제 직전에 NavGuard._initResize()가 호출
-   */
   function snapCenterCfi() {
     if (!store.rendition) return _lastCenterCfi;
     try {
@@ -235,20 +221,17 @@ const CFIPrecisionGuard = (() => {
       iframes.forEach(iframe => {
         const doc = iframe.contentDocument;
         if (!doc?.body) return;
-        /* p, h1~h4, li — 단락 단위 탐색 */
         const paras = doc.querySelectorAll('p,h1,h2,h3,h4,li');
         paras.forEach(el => {
-          /* iframe 좌표를 host 뷰포트 좌표로 변환 */
-          const iRect   = iframe.getBoundingClientRect();
-          const elRect  = el.getBoundingClientRect();
-          const elTop   = iRect.top + elRect.top;
-          const elMid   = elTop + elRect.height / 2;
-          const dist    = Math.abs(elMid - vMid);
+          const iRect  = iframe.getBoundingClientRect();
+          const elRect = el.getBoundingClientRect();
+          const elTop  = iRect.top + elRect.top;
+          const elMid  = elTop + elRect.height / 2;
+          const dist   = Math.abs(elMid - vMid);
           if (dist < bestDist) { bestDist = dist; bestEl = el; }
         });
       });
 
-      /* 가장 가까운 요소를 찾았으면 현재 rendition CFI를 메모이제이션 */
       if (bestEl) {
         const cfi = store.currentCFI;
         if (cfi) _lastCenterCfi = cfi;
@@ -265,8 +248,6 @@ const CFIPrecisionGuard = (() => {
   }
 
   function destroy() {
-    /* 현재 구현은 경량 마커 객체이므로 disconnect 불필요.
-       미래 IntersectionObserver 인스턴스 추가 시 여기서 해제. */
     _observer      = null;
     _lastCenterCfi = '';
   }
@@ -280,14 +261,14 @@ const CFIPrecisionGuard = (() => {
    — store.measuredWpm에 rAF 배칭으로 반영 (Reactive 파이프라인 활용)
    ══════════════════════════════════════════════════════════════════ */
 export const WPMTracker = (() => {
-  const SAMPLE_WINDOW  = 10;   /* 최근 10회 넘김 샘플 */
-  const WORDS_PER_PAGE = 250;  /* 페이지당 평균 단어 수 추정치 */
+  const SAMPLE_WINDOW  = 10;
+  const WORDS_PER_PAGE = 250;
 
-  let _samples        = [];  /* [{ ts: number, elapsedMs: number }] */
+  let _samples        = [];
   let _lastPageTs     = 0;
   let _sessionStartTs = 0;
   let _totalPages     = 0;
-  let _wpmRafId       = null; /* rAF 배칭용 */
+  let _wpmRafId       = null;
   let _pendingWpm     = 0;
 
   function startSession() {
@@ -302,7 +283,6 @@ export const WPMTracker = (() => {
     const now = Date.now();
     if (_lastPageTs === 0) { _lastPageTs = now; return; }
     const elapsed = now - _lastPageTs;
-    /* 500ms 미만은 빠른 탐색(스킵)으로 판단 — 샘플 제외 */
     if (elapsed < 500) return;
     _lastPageTs = now;
     _totalPages++;
@@ -311,7 +291,6 @@ export const WPMTracker = (() => {
     _scheduleWpmUpdate();
   }
 
-  /* rAF 배칭: 연속 넘김 시 마지막 프레임에서만 store 업데이트 */
   function _scheduleWpmUpdate() {
     if (_wpmRafId) return;
     _wpmRafId = requestAnimationFrame(() => {
@@ -322,8 +301,6 @@ export const WPMTracker = (() => {
 
   function _computeAndCommitWpm() {
     if (_samples.length < 2) return;
-
-    /* IQR 이상치 제거 (Tukey Fence: Q1 - 1.5×IQR ~ Q3 + 1.5×IQR) */
     const times    = _samples.map(s => s.elapsedMs).sort((a, b) => a - b);
     const q1Idx    = Math.floor(times.length * 0.25);
     const q3Idx    = Math.floor(times.length * 0.75);
@@ -333,15 +310,10 @@ export const WPMTracker = (() => {
     const lo       = q1 - 1.5 * iqr;
     const hi       = q3 + 1.5 * iqr;
     const filtered = times.filter(t => t >= lo && t <= hi);
-
     if (!filtered.length) return;
-    const avgMs = filtered.reduce((s, t) => s + t, 0) / filtered.length;
-
-    /* WPM = (단어/페이지) ÷ (평균 페이지 독서 시간[분]) */
-    const wpm = Math.round(WORDS_PER_PAGE / (avgMs / 60_000));
+    const avgMs   = filtered.reduce((s, t) => s + t, 0) / filtered.length;
+    const wpm     = Math.round(WORDS_PER_PAGE / (avgMs / 60_000));
     const clamped = Math.min(1500, Math.max(50, wpm));
-
-    /* store 업데이트는 이미 rAF 내부이므로 즉시 반영 */
     store.measuredWpm = clamped;
   }
 
@@ -368,15 +340,10 @@ export const WPMTracker = (() => {
    ══════════════════════════════════════════════════════════════════ */
 export const AutoScrollDriver = (() => {
   let _rafId    = null;
-  let _targetIw = null;  /* 현재 스크롤 대상 iframe.contentWindow */
-  let _speed    = 0;     /* px/프레임 */
+  let _targetIw = null;
+  let _speed    = 0;
   let _active   = false;
 
-  /**
-   * WPM → px/프레임 변환
-   * 분당 픽셀 = WPM × 평균 단어 너비(px) / 줄당 단어 수
-   * 프레임당 픽셀 = 분당 픽셀 / (FPS × 60초)
-   */
   function _calcPxPerFrame(wpm) {
     const AVG_WORD_PX    = 40;
     const WORDS_PER_LINE = 12;
@@ -386,7 +353,6 @@ export const AutoScrollDriver = (() => {
   }
 
   function _loop() {
-    /* 슬립 가드: 백그라운드 전환 시 루프 종료 */
     if (!_active || store.appInBackground) { _rafId = null; return; }
     if (_targetIw) {
       try { _targetIw.scrollBy(0, _speed); } catch (_) {}
@@ -409,7 +375,6 @@ export const AutoScrollDriver = (() => {
     _targetIw = null;
   }
 
-  /* WPM 변경 시 속도 즉시 갱신 */
   function updateSpeed() {
     _speed = _calcPxPerFrame(WPMTracker.getWpm());
   }
@@ -419,7 +384,6 @@ export const AutoScrollDriver = (() => {
       stop();
       Toast.show('자동 스크롤 중지');
     } else {
-      /* scrolled 플로우 모드에서만 활성화 */
       const iframe = view?.element?.querySelector?.('iframe');
       if (iframe?.contentWindow && store.flow === 'scrolled') {
         start(iframe.contentWindow);
@@ -430,13 +394,10 @@ export const AutoScrollDriver = (() => {
     }
   }
 
-  /* 슬립 가드 구독 — appInBackground 전환 즉시 루프 정지/재개 */
   ReactiveStore.subscribe('appInBackground', (hidden) => {
     if (hidden && _active) {
-      /* 백그라운드 전환: rAF 취소 (루프 자체는 _active=true 유지) */
       if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
     } else if (!hidden && _active) {
-      /* 포그라운드 복귀: rAF 재개 */
       if (!_rafId) _rafId = requestAnimationFrame(_loop);
     }
   });
@@ -458,7 +419,6 @@ export const EyeProtectTimer = (() => {
   let _dimEl      = null;
   let _restEl     = null;
 
-  /* CSS 키프레임 1회 주입 */
   function _ensureKeyframes() {
     if (document.getElementById('eye-protect-kf')) return;
     const sty = document.createElement('style');
@@ -498,20 +458,19 @@ export const EyeProtectTimer = (() => {
       'animation:restBounce 2s ease-in-out infinite',
     ].join(';');
 
-    /* XSS 방어: DOM 조립 방식 사용 */
-    const icon    = document.createElement('div');
+    const icon  = document.createElement('div');
     icon.textContent = '👁️';
     icon.style.cssText = 'font-size:28px;margin-bottom:8px';
 
-    const title   = document.createElement('div');
+    const title = document.createElement('div');
     title.textContent = '시력 보호 휴식 알림';
     title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:4px';
 
-    const desc    = document.createElement('div');
+    const desc  = document.createElement('div');
     desc.textContent = `${store.eyeProtectMinutes || 50}분 동안 읽으셨습니다. 잠시 눈을 쉬게 해주세요.`;
     desc.style.cssText = 'font-size:13px;color:#666;margin-bottom:14px';
 
-    const btn     = document.createElement('button');
+    const btn   = document.createElement('button');
     btn.textContent = '확인';
     btn.id = 'eye-rest-dismiss';
     btn.style.cssText = [
@@ -531,12 +490,12 @@ export const EyeProtectTimer = (() => {
   function dismissRest() {
     _dimEl?.remove();  _dimEl  = null;
     _restEl?.remove(); _restEl = null;
-    _elapsedSec = 0;   /* 타이머 리셋 */
+    _elapsedSec = 0;
     Toast.show('5분간 휴식 후 다시 읽어주세요. 🌿', 'info');
   }
 
   function _tick() {
-    if (_paused || store.appInBackground) return;  /* 슬립 가드 */
+    if (_paused || store.appInBackground) return;
     _elapsedSec++;
     const limitSec = (store.eyeProtectMinutes || 50) * 60;
     if (_elapsedSec >= limitSec) {
@@ -569,7 +528,6 @@ export const EyeProtectTimer = (() => {
     }
   }
 
-  /* 슬립 가드: 백그라운드 전환 시 타이머 일시 정지 */
   ReactiveStore.subscribe('appInBackground', (hidden) => { _paused = hidden; });
 
   return { start, stop, toggle, dismissRest };
@@ -666,6 +624,10 @@ export async function openEpubBook(fileData, isBuffer = false) {
   LoadingOverlay.show('도서 버퍼를 확장하는 중...');
   await destroyCurrentRenditionContext();
 
+  /*
+   * ErrorBoundary.wrap(domain, fn) → 래핑된 async 함수를 반환.
+   * 반환된 함수를 즉시 호출 ()() — 올바른 사용법.
+   */
   const result = await ErrorBoundary.wrap('renderer', async () => {
     const book = await Promise.race([
       new Promise((res, rej) => {
@@ -752,10 +714,10 @@ export function registerEpubThemes(rendition) {
   });
   rendition.themes.register('custom', {
     body: { ...BASE,
-            background:      store.userBg  + ' !important',
-            color:           store.userInk + ' !important',
+            background:       store.userBg  + ' !important',
+            color:            store.userInk + ' !important',
             'letter-spacing': store.userSpacing + 'em',
-            'line-height':   String(store.userLeading) },
+            'line-height':    String(store.userLeading) },
     img: { 'max-width': '100%', height: 'auto', display: 'block', margin: '0 auto' },
   });
 }
@@ -782,20 +744,17 @@ export function injectContentStyles(contents) {
   const spVal    = isCustom ? `${store.userSpacing}em` : '0em';
   const userLH   = isCustom ? String(store.userLeading) : lhVal;
 
-  /* [E-Ink] 폰트 굵기 보정 */
   const weightBoost = store.fontWeightBoost || 0;
   const baseWeight  = isDark ? 300 : 400;
   const finalWeight = Math.max(100, Math.min(900, baseWeight + weightBoost));
 
-  /* [E-Ink] 대비 스케일 보정 */
-  const contrast = store.contrastScale ?? 1.0;
+  const contrast  = store.contrastScale ?? 1.0;
   const filterVal = isDark
     ? `contrast(${(0.92 * contrast).toFixed(2)})`
     : contrast !== 1.0
       ? `contrast(${contrast.toFixed(2)})`
       : '';
 
-  /* [이미지] 다크 모드 35% 감쇄 (brightness(0.65) = 100% - 35%) */
   const imgFilter = isDark ? 'filter: brightness(0.65) contrast(0.9);' : '';
 
   style.textContent = `
@@ -851,6 +810,26 @@ export function initRenditionEngine(book) {
     height  : '100%',
     spread  : 'none',
     snap    : true,
+    /*
+     * [버그1·2 수정] allowScriptedContent: true
+     * ─────────────────────────────────────────────────────────────
+     * epub.js 0.3.x 는 렌더링 대상 iframe 을 생성할 때 내부적으로
+     *   iframe.sandbox = 'allow-same-origin allow-scripts ...'
+     * 를 설정하는데, Chromium 계열 브라우저가 srcdoc 기반 iframe 에
+     * 'allow-scripts' 권한을 별도로 부여하지 않으면 스크립트 실행을
+     * 완전 차단한다.
+     *
+     * epub.js 의 View 클래스(IframeView)는 iframe 초기화 완료 후
+     *   view.start()  →  view.hooks.content.trigger()
+     * 흐름으로 콘텐츠 훅을 실행하는데, 스크립트 차단 상태에서는
+     * iframe document 접근이 불완전하여 `start is not a function`
+     * TypeError 또는 내부 메서드 누락 크래시가 발생한다.
+     *
+     * allowScriptedContent: true 를 명시하면 epub.js 가 iframe 의
+     * sandbox 속성에 'allow-scripts' 를 포함시켜 이 문제를 해결한다.
+     * ─────────────────────────────────────────────────────────────
+     */
+    allowScriptedContent: true,
   });
   store.rendition = rendition;
 
@@ -902,8 +881,8 @@ export function initRenditionEngine(book) {
 
 function _applyAllRenditionSettings(rendition) {
   const t = store.theme === 'custom' ? 'custom' : store.theme;
-  try { rendition.themes.select(t); }              catch (_) {}
-  try { rendition.themes.fontSize(`${store.fontSize}%`); } catch (_) {}
+  try { rendition.themes.select(t); }                                       catch (_) {}
+  try { rendition.themes.fontSize(`${store.fontSize}%`); }                  catch (_) {}
   try { rendition.themes.override('line-height', LH_MAP[store.lineHeight] || '1.85'); } catch (_) {}
   if (store.theme === 'custom') injectCustomToIframe();
 }
@@ -941,14 +920,12 @@ function _updateArrowState(location) {
    Phase 5: store 상태 DOM 소거
    ══════════════════════════════════════════════════════════════════ */
 export async function destroyCurrentRenditionContext() {
-  /* 잔여 진행률 버퍼 즉시 커밋 */
   await StorageSystem.flushProgressNow();
 
-  /* 세션 종속 모듈 정리 */
   deps.ReadingStatsTracker.stopSession();
   WPMTracker.stopSession();
   AutoScrollDriver.stop();
-  EyeProtectTimer.stop();      /* 눈 보호 타이머도 함께 종료 */
+  EyeProtectTimer.stop();
 
   NavGuard.destroy();
   deps.SearchEngine.destroy();
@@ -957,17 +934,8 @@ export async function destroyCurrentRenditionContext() {
   CFICache.clear();
   CFIPrecisionGuard.destroy();
 
-  /* ResourceRegistry 전체 소멸
-     (리스너 + 스토어 구독 + 타이머 + ResizeObserver +
-      IntersectionObserver + rAF — v4.0 신규 항목 포함) */
   ResourceRegistry.releaseAll();
 
-  /* ──────────────────────────────────────────────────────────
-     Phase 1: rendition 이벤트 리스너 전량 명시 탈착
-     epub.js Rendition은 EventEmitter 패턴이므로, destroy() 이전에
-     등록된 모든 named 이벤트를 r.off()로 명시 탈착한다.
-     → 구 rendition 콜백이 store Proxy를 이중 구독하는 누수 차단.
-     ────────────────────────────────────────────────────────── */
   if (store.rendition) {
     const r = store.rendition;
 
@@ -979,12 +947,6 @@ export async function destroyCurrentRenditionContext() {
       try { r.off(ev); } catch (_) {}
     }
 
-    /* ──────────────────────────────────────────────────────────
-       Phase 2: hooks 익명화
-       destroy() 후에도 epub.js 내부가 hooks.content / hooks.serialize
-       등을 flush 하려 할 때 사용자 콜백이 실행되는 것을 차단.
-       epub.js EventEmitter의 clear() 또는 직접 배열 교체로 무력화.
-       ────────────────────────────────────────────────────────── */
     const HOOK_KEYS = ['content', 'serialize', 'unloaded'];
     HOOK_KEYS.forEach(h => {
       try {
@@ -1000,115 +962,109 @@ export async function destroyCurrentRenditionContext() {
       } catch (_) {}
     });
 
-    /* ──────────────────────────────────────────────────────────
-       Phase 3: rendition.destroy() → iframe 컨텍스트 파기
-       ────────────────────────────────────────────────────────── */
     try { r.destroy(); } catch (_) {}
-    store.rendition = null;
   }
 
-  /* ──────────────────────────────────────────────────────────
-     Phase 4: book.destroy() → 순서 보정
-     rendition 파기 이후 book을 파기해야 epub.js 내부
-     View Manager가 이미 해제된 rendition에 접근하는 것을 방지.
-     ────────────────────────────────────────────────────────── */
   if (store.book) {
     try { store.book.destroy(); } catch (_) {}
-    store.book = null;
   }
 
-  /* ──────────────────────────────────────────────────────────
-     Phase 5: store 상태 + DOM 소거
-     ────────────────────────────────────────────────────────── */
-  store.currentCFI     = '';
-  store.currentHref    = '';
+  store.rendition     = null;
+  store.book          = null;
+  store.currentCFI    = '';
+  store.currentHref   = '';
   store.totalLocations = 0;
-  store.toc            = [];
-  store.bookKey        = '';
-  store.isViewerOpen   = false;
-}
+  _lastSyncedPct      = -1;
 
-export function exitViewer() {
-  destroyCurrentRenditionContext().then(() => showUploaderScreen());
+  const vp = DOMProxy.get('viewer-viewport');
+  if (vp && vp !== DOMProxy.VOID_NODE) {
+    try { vp.innerHTML = ''; } catch (_) {}
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   flow 전환 (CFI 보정 스케줄러)
+   뷰어 종료
    ══════════════════════════════════════════════════════════════════ */
-export function switchFlowMode(mode) {
-  if (store.flow === mode || !store.book) return;
-  const savedCFI  = store.currentCFI;
-  const savedBook = store.book;
+export async function exitViewer() {
+  await destroyCurrentRenditionContext();
+  showUploaderScreen();
+  await deps.refreshLibraryData();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   플로우 모드 전환
+   ══════════════════════════════════════════════════════════════════ */
+export async function switchFlowMode(mode) {
+  if (mode === store.flow) return;
   store.flow = mode;
-  destroyCurrentRenditionContext().then(() => {
-    store.book = savedBook;
-    initRenditionEngine(savedBook);
+  if (!store.book) return;
+  const savedCFI  = store.currentCFI;
+  const savedKey  = store.bookKey;
+  await destroyCurrentRenditionContext();
+  store.book = null;
+  const cleanKey = savedKey?.replace('fable_cfi_', '') || savedKey;
+  const rec = await StorageSystem.getBook(cleanKey);
+  if (rec?.bytes) {
+    await openEpubBook(rec.bytes, true);
     if (savedCFI) {
-      ResourceRegistry.addTimer(
-        setTimeout(() => { store.rendition?.display(savedCFI).catch(() => {}); }, 350),
-      );
+      setTimeout(() => {
+        try { store.rendition?.display(savedCFI).catch(() => {}); } catch (_) {}
+      }, 600);
     }
-  });
+  }
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   퍼센트 기반 챕터/페이지 탐색
+   ══════════════════════════════════════════════════════════════════ */
 export function chapterAtPercent(pct) {
-  try {
-    const toc = store.toc || [];
-    if (!toc.length || !store.book?.spine) return '';
-    const spineLen = store.book.spine.items.length || 1;
-    const idx      = Math.min(spineLen - 1, Math.floor((pct / 100) * spineLen));
-    const href     = store.book.spine.items[idx]?.href || '';
-    let label      = '';
-    const walk = (items) => {
-      for (const it of items) {
-        const ih = (it.href || '').split('#')[0];
-        if (ih && href.includes(ih)) label = it.label?.trim() || label;
-        if (it.subitems?.length) walk(it.subitems);
-      }
-    };
-    walk(toc);
-    return label || `${idx + 1}번째 구간`;
-  } catch (_) { return ''; }
+  if (!store.book?.spine?.items?.length) return '';
+  const items = store.book.spine.items;
+  const idx   = Math.min(items.length - 1, Math.floor((pct / 100) * items.length));
+  return items[idx]?.label || items[idx]?.href?.split('/').pop()?.replace('.xhtml', '') || '';
 }
 
-export function seekToPercent(pct) {
+export async function seekToPercent(pct) {
   if (!store.rendition || !store.book) return;
-  pct = Math.min(100, Math.max(0, pct));
   try {
-    if (store.book.locations && store.totalLocations > 0) {
-      const cfi = CFICache.getCfi(
-        pct / 100,
-        () => store.book.locations.cfiFromPercentage(pct / 100),
-      );
-      if (cfi) { store.rendition.display(cfi).catch(() => {}); return; }
+    if (store.totalLocations > 0 && store.book.locations) {
+      const cfi = CFICache.getCfi(pct / 100, () => {
+        try { return store.book.locations.cfiFromPercentage(pct / 100); } catch (_) { return null; }
+      });
+      if (cfi) { await store.rendition.display(cfi).catch(() => {}); return; }
     }
-    const spineLen = store.book.spine?.items?.length || 1;
-    const idx      = Math.min(spineLen - 1, Math.floor((pct / 100) * spineLen));
-    const item     = store.book.spine?.items?.[idx];
-    if (item) store.rendition.display(item.href).catch(() => {});
+    const items = store.book.spine?.items || [];
+    if (!items.length) return;
+    const idx = Math.min(items.length - 1, Math.floor((pct / 100) * items.length));
+    await store.rendition.display(items[idx].href).catch(() => {});
   } catch (e) { ErrorBoundary.handle('renderer', e, 'seekToPercent'); }
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   NavGuard — 스와이프 관성 + 바운스 + 리사이즈 마스크
-   [바운스] 첫/마지막 페이지 고무줄 텐션 인터랙션 (CSS Transform + rAF)
-   [3D 전환] fade | slide | flip3d
+   NavGuard — 페이지 네비게이션 뮤텍스 + 리사이즈 + 터치
    ══════════════════════════════════════════════════════════════════ */
 export const NavGuard = (() => {
-  let navigating = false, pending = null, resizeObs = null, resizeTimer = null;
-  let gestureAxis = null, touchStartX = 0, touchStartY = 0, touchStartTime = 0, cfiSnap = '';
-  let _atStart = false, _atEnd = false;
+  let navigating     = false;
+  let pending        = null;
+  let resizeObs      = null;
+  let resizeTimer    = null;
+  let cfiSnap        = '';
+  let touchStartX    = 0;
+  let touchStartY    = 0;
+  let touchStartTime = 0;
+  let gestureAxis    = null;
+  let _atStart       = false;
+  let _atEnd         = false;
 
   function acquire() {
     if (navigating) return false;
-    navigating = true; _setArrows(false);
-    return true;
+    navigating = true; return true;
   }
   function release() {
-    navigating = false; _setArrows(true);
+    navigating = false;
     if (pending) {
-      const d = pending; pending = null;
-      requestAnimationFrame(() => d === 'prev' ? prev() : next());
+      const p = pending; pending = null;
+      p === 'next' ? next() : prev();
     }
   }
   function onRelocated(location) {
@@ -1131,10 +1087,9 @@ export const NavGuard = (() => {
     try { await store.rendition.next(); } catch (_) { release(); }
   }
 
-  /* [3D 전환] slide / flip3d 애니메이션 */
   function _triggerPageTransition(dir) {
     const mode = store.pageTransition || 'fade';
-    if (mode === 'fade') return;  /* 기본값 — epub.js 자체 처리 */
+    if (mode === 'fade') return;
 
     const vp = DOMProxy.get('viewer-viewport');
     if (!vp || vp === DOMProxy.VOID_NODE) return;
@@ -1172,7 +1127,6 @@ export const NavGuard = (() => {
     }
   }
 
-  /* [바운스] 첫/마지막 페이지 고무줄 텐션 */
   function _playBounce(dir) {
     const vp = DOMProxy.get('viewer-viewport');
     if (!vp || vp === DOMProxy.VOID_NODE) return;
@@ -1198,7 +1152,6 @@ export const NavGuard = (() => {
       resizeTimer = setTimeout(async () => {
         if (!store.rendition || !store.isViewerOpen) { ResizeMask.hide(); return; }
 
-        /* [CFI] 리사이즈 시 화면 중앙 CFI 스냅샷 보정 */
         const centerCfi = CFIPrecisionGuard.snapCenterCfi();
         const targetCfi = centerCfi || cfiSnap;
 
@@ -1228,7 +1181,7 @@ export const NavGuard = (() => {
     const SWIPE_MIN    = 50;
     const AXIS_LOCK    = 8;
     const EDGE_PX      = window.innerWidth * 0.1;
-    const VELOCITY_MIN = 0.35;   /* px/ms — 빠르게 튕기면 짧은 거리도 넘김 */
+    const VELOCITY_MIN = 0.35;
     let lastX = 0, lastT = 0, velocity = 0;
 
     const onStart = (e) => {
@@ -1259,7 +1212,6 @@ export const NavGuard = (() => {
       const elapsed = Date.now() - touchStartTime;
       const deltaX  = e.changedTouches[0].clientX - touchStartX;
       gestureAxis   = null;
-      /* 엣지 영역(좌우 10%) 스와이프 무시 — 오발 방지 */
       if (touchStartX < EDGE_PX || touchStartX > window.innerWidth - EDGE_PX) return;
       const farEnough = Math.abs(deltaX) >= SWIPE_MIN && elapsed <= 500;
       const fastFlick = Math.abs(velocity) >= VELOCITY_MIN && Math.abs(deltaX) > 16;
@@ -1268,7 +1220,6 @@ export const NavGuard = (() => {
         ? (velocity < 0 ? 'next' : 'prev')
         : (deltaX  < 0 ? 'next' : 'prev');
 
-      /* [바운스 가드] 경계 페이지에서 고무줄 텐션 */
       if (dir === 'prev' && _atStart) { _playBounce('prev'); return; }
       if (dir === 'next' && _atEnd)   { _playBounce('next'); return; }
 
@@ -1316,7 +1267,6 @@ export function generateLocationsBackground(book) {
       w.onerror   = ()  => { URL.revokeObjectURL(url); w.terminate(); };
     } catch (_) {}
   }
-  /* 폴백: 메인스레드 generate (느리지만 항상 동작) */
   book.locations.generate(1600)
     .then(l => { store.totalLocations = Math.max(store.totalLocations, l.length); })
     .catch(() => {});

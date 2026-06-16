@@ -1,5 +1,5 @@
 /**
- * src/ui/viewer.js  ── Fable Premium v4.0
+ * src/ui/viewer.js  ── Fable Premium v4.1
  * ─────────────────────────────────────────────────────────────────
  * 독서(뷰어) UI + 부가 기능 모듈
  *
@@ -15,6 +15,16 @@
  *   MetadataEditor, AnnotationExporter(MD/JSON/PDF),
  *   LibraryFullTextSearch, VirtualListRenderer,
  *   CloudBackup(WebDAV/Drive), Pomodoro, 스크롤 맨위로 버튼
+ *
+ * [버그 수정 v4.1]
+ *   - updateTocActiveItem: 현재 챕터 자동 스크롤 정렬(scrollTop 보정) 추가
+ *   - initAnnotationManager 래퍼 제거 — main.js가 AnnotationManager를
+ *     deps로 직접 주입하므로 중복 래퍼 불필요 (export 목록에서 삭제)
+ *   - truncateTitle import 제거 — viewer.js 내부 미사용
+ *
+ * ※ 순환 의존성 차단:
+ *   uploader.js와 viewer.js는 직접 상호 import 금지.
+ *   uploader.js → refreshLibraryData만 단방향 import 허용.
  * ─────────────────────────────────────────────────────────────────
  */
 
@@ -27,7 +37,7 @@ import {
 import { StorageSystem } from '../database.js';
 import { AnnotationSyncEngine } from '../sync.js';
 import { openEpubBook, waitForEpubJS, awaitBookReady } from '../reader.js';
-import { refreshLibraryData, truncateTitle } from './uploader.js';
+import { refreshLibraryData } from './uploader.js';
 
 /* ══════════════════════════════════════════════════════════
    §21. TOC 사이드바
@@ -68,14 +78,51 @@ function renderTocSidebar(tocData) {
   container.appendChild(frag);
 }
 
+/*
+ * [버그 수정] updateTocActiveItem
+ * ──────────────────────────────────────────────────────────────
+ * 기존 코드: active 클래스 토글만 수행. 현재 챕터가 목차 리스트
+ * 어느 위치에 있는지와 관계없이 스크롤이 이동하지 않았음.
+ *
+ * 수정 내용:
+ *   1. active 아이템을 추적하여 activeEl 변수에 보존.
+ *   2. rAF 내에서 container.scrollTop = activeEl.offsetTop 으로
+ *      현재 챕터를 목차 스크롤 뷰의 최상단에 정렬.
+ *   3. scrollIntoView() 미사용 — 전체 페이지 스크롤 부작용 차단.
+ * ──────────────────────────────────────────────────────────────
+ */
 function updateTocActiveItem(href) {
-  DOMProxy.get('toc-list').querySelectorAll?.('.toc-item').forEach(item => {
-    const ih = item.dataset.href || '';
-    item.classList.toggle(
-      'active',
-      !!(ih && (href.includes(ih.split('#')[0]) || ih.includes(href.split('#')[0])))
-    );
+  const container = DOMProxy.get('toc-list');
+  if (!container) return;
+
+  let activeEl = null;
+  container.querySelectorAll?.('.toc-item').forEach(item => {
+    const ih       = item.dataset.href || '';
+    const isActive = !!(ih && (
+      href.includes(ih.split('#')[0]) || ih.includes(href.split('#')[0])
+    ));
+    item.classList.toggle('active', isActive);
+    /* 첫 번째 매칭 아이템만 저장 */
+    if (isActive && !activeEl) activeEl = item;
   });
+
+  /*
+   * 목차가 열려 있든 닫혀 있든 scrollTop 을 미리 보정해두어
+   * 다음에 목차를 열었을 때 즉시 올바른 위치가 보이도록 한다.
+   * rAF 1프레임 후 실행 → DOM 렌더 완료 보장.
+   */
+  if (activeEl) {
+    requestAnimationFrame(() => {
+      try {
+        /*
+         * offsetTop: activeEl 의 offsetParent(= toc-list 스크롤 컨테이너)
+         * 기준 상단 좌표. 이를 scrollTop 에 직접 대입하면 해당 아이템이
+         * 컨테이너 뷰의 정확히 최상단(top)에 위치한다.
+         */
+        container.scrollTop = activeEl.offsetTop;
+      } catch (_) {}
+    });
+  }
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -98,10 +145,10 @@ const VirtualSearchList = (() => {
 
   function _renderChunk(start, q) {
     if (!container) return;
-    const end = Math.min(start + VISIBLE, allResults.length);
+    const end  = Math.min(start + VISIBLE, allResults.length);
     const frag = document.createDocumentFragment();
     for (let i = start; i < end; i++) {
-      const m = allResults[i], node = pool.pop() || _createItem();
+      const m    = allResults[i], node = pool.pop() || _createItem();
       node.querySelector('.sri-section').textContent = `${i + 1}. ${(m.sectionHref || '').split('/').pop()}`;
       const snip = node.querySelector('.sri-snippet');
       snip.innerHTML = '';
@@ -170,25 +217,16 @@ const VirtualSearchList = (() => {
 
 /* ══════════════════════════════════════════════════════════
    §23. SearchEngine — Web Worker 이관 (UI 프리징 제로)
-   ─────────────────────────────────────────────────────────
-   핵심 구조:
-   · SearchWorker: 인라인 Blob Worker로 Spine 파싱/정규식 매칭을 격리
-   · SearchEngine: Worker 생명주기 관리 + 메인스레드 캐시 관리자
    ══════════════════════════════════════════════════════════ */
-
-/* ── Web Worker 소스 (인라인 Blob) ── */
 const _SEARCH_WORKER_SRC = /* js */`
 'use strict';
-
-/* Spine 텍스트 인덱스를 전달받아 키워드 검색 후 결과 반환 */
-let _index = [];   /* [{ sectionHref, cfi, context }] */
+let _index = [];
 let _built = false;
 
 self.onmessage = function(e) {
   const { type, payload, id } = e.data || {};
 
   if (type === 'INDEX') {
-    /* 메인스레드에서 직렬화된 인덱스 배열을 수신하여 저장 */
     _index = payload || [];
     _built = _index.length > 0;
     self.postMessage({ type: 'INDEX_READY', id, count: _index.length });
@@ -199,10 +237,8 @@ self.onmessage = function(e) {
     if (!_built) { self.postMessage({ type: 'RESULT', id, results: [] }); return; }
     const kw = (payload.keyword || '').toLowerCase().trim();
     if (kw.length < 2) { self.postMessage({ type: 'RESULT', id, results: [] }); return; }
-
     const results = [];
     const seen    = new Set();
-
     for (let i = 0; i < _index.length; i++) {
       const item = _index[i];
       if (item.context.toLowerCase().includes(kw) && !seen.has(item.cfi)) {
@@ -222,15 +258,13 @@ self.onmessage = function(e) {
 };
 `;
 
-/* ── SearchEngine (워커 생명주기 + 인덱스 빌더) ── */
 const SearchEngine = (() => {
-  let _worker    = null;   /* Web Worker 인스턴스 */
-  let _workerUrl = null;   /* Blob URL (메모리 해제용) */
+  let _worker    = null;
+  let _workerUrl = null;
   let _isBuilt   = false;
-  let _pending   = new Map(); /* requestId → { resolve, reject } */
+  let _pending   = new Map();
   let _seq       = 0;
 
-  /** Worker 초기화 (최초 1회) */
   function _ensureWorker() {
     if (_worker) return;
     try {
@@ -243,14 +277,13 @@ const SearchEngine = (() => {
         const ticket = _pending.get(id);
         if (ticket) {
           _pending.delete(id);
-          if (type === 'RESULT')      ticket.resolve(results);
+          if (type === 'RESULT')           ticket.resolve(results);
           else if (type === 'INDEX_READY') ticket.resolve(count);
           else if (type === 'RESET_DONE')  ticket.resolve(true);
         }
       };
       _worker.onerror = (err) => {
         console.error('[SearchEngine Worker]', err.message);
-        /* 워커 오류 시 모든 대기 Promise 거부 처리 */
         _pending.forEach(t => t.reject(err));
         _pending.clear();
         _worker = null;
@@ -261,12 +294,10 @@ const SearchEngine = (() => {
     }
   }
 
-  /** 워커로 메시지를 전송하고 응답 Promise를 반환 */
   function _send(type, payload) {
     return new Promise((resolve, reject) => {
       const id = ++_seq;
       _pending.set(id, { resolve, reject });
-      /* 타임아웃 안전망 (30s) */
       setTimeout(() => {
         if (_pending.has(id)) { _pending.delete(id); reject(new Error('Worker timeout: ' + type)); }
       }, 30000);
@@ -274,18 +305,12 @@ const SearchEngine = (() => {
     });
   }
 
-  /**
-   * book의 Spine 전체를 파싱하여 검색 인덱스를 빌드하고 Worker에 전달
-   * — 메인스레드에서는 DOM 파싱(DOMParser)만 수행하고 무거운 색인 연산은 워커에 위임
-   */
   async function build(book) {
     if (_isBuilt || !book) return;
     _ensureWorker();
-
     const indexArr = [];
-    const parser = new DOMParser();
-    const items  = book.spine?.items || [];
-
+    const parser   = new DOMParser();
+    const items    = book.spine?.items || [];
     for (const item of items) {
       try {
         const section = book.spine.get(item.href || item.idref);
@@ -300,46 +325,37 @@ const SearchEngine = (() => {
           indexArr.push({ sectionHref: item.href || '', cfi, context: text.slice(0, 160) });
         });
         section.unload();
-        /* 프레임 양보 — 메인스레드 60fps 유지 */
         await new Promise(r => setTimeout(r, 0));
       } catch (_) {}
     }
-
     if (_worker) {
       await _send('INDEX', indexArr);
       _isBuilt = true;
     } else {
-      /* 워커 없음 폴백: 메인스레드에서 직접 보유 */
       SearchEngine._fallbackIndex = indexArr;
       _isBuilt = true;
     }
   }
 
-  /** 키워드 검색 — Worker가 있으면 Worker에서, 없으면 메인스레드 폴백 */
   async function query(keyword) {
     if (!_isBuilt || (keyword || '').length < 2) return [];
-
     if (_worker) {
       try { return await _send('QUERY', { keyword }); }
-      catch (_) { /* 폴백 */ }
+      catch (_) {}
     }
-
-    /* 메인스레드 폴백 */
     const kw   = keyword.toLowerCase().trim();
     const arr  = SearchEngine._fallbackIndex || [];
     const out  = [];
     const seen = new Set();
     for (const item of arr) {
       if (item.context.toLowerCase().includes(kw) && !seen.has(item.cfi)) {
-        seen.add(item.cfi);
-        out.push(item);
+        seen.add(item.cfi); out.push(item);
         if (out.length >= 200) break;
       }
     }
     return out;
   }
 
-  /** 워커 소멸 + 메모리 정리 */
   function destroy() {
     if (_worker) {
       try { _worker.terminate(); } catch (_) {}
@@ -357,7 +373,6 @@ const SearchEngine = (() => {
 async function runSearchExecution() {
   const q = DOMProxy.get('input-search-query').value?.trim() ?? '';
   if (q.length < 2) { Toast.show('검색어는 2글자 이상 입력하세요.', 'error'); return; }
-  /* 비동기 Worker 쿼리 — UI 프리징 없음 */
   const results = await SearchEngine.query(q);
   VirtualSearchList.render(DOMProxy.get('search-results-container'), results, q);
 }
@@ -374,149 +389,89 @@ function injectSearchHighlight(cfi) {
 
 /* ══════════════════════════════════════════════════════════
    §23-B. OnboardingGuide
-   ─────────────────────────────────────────────────────────
-   store.onboardingDone === false 일 때 600ms 후 자동 구동.
-   업로드 영역 → 상단 메뉴 → 하단 메뉴 뷰포트를 순차적으로
-   반투명 오버레이 + 하이라이트 레이어 + 툴팁으로 안내.
    ══════════════════════════════════════════════════════════ */
 const OnboardingGuide = (() => {
   let _overlay = null, _box = null, _tooltip = null, _step = 0, _timer = null;
 
   const STEPS = [
-    {
-      targetId: 'drop-zone',
-      title:    '📚 EPUB 파일 추가',
-      body:     'EPUB 파일을 이 영역에 드래그하거나 탭하여 서재에 추가하세요.',
-      pos:      'bottom',
-    },
-    {
-      targetId: 'top-bar',
-      title:    '🔎 상단 메뉴',
-      body:     '검색, 목차, TTS, 포모도로 등 다양한 독서 도구를 이용하세요.',
-      pos:      'bottom',
-    },
-    {
-      targetId: 'bottom-bar',
-      title:    '⚙️ 하단 메뉴',
-      body:     '설정, 테마 변경, 페이지 넘김 효과를 커스터마이즈할 수 있습니다.',
-      pos:      'top',
-    },
+    { targetId: 'drop-zone',   title: '📚 EPUB 파일 추가',  body: 'EPUB 파일을 이 영역에 드래그하거나 탭하여 서재에 추가하세요.',               pos: 'bottom' },
+    { targetId: 'top-bar',     title: '🔎 상단 메뉴',        body: '검색, 목차, TTS, 포모도로 등 다양한 독서 도구를 이용하세요.',               pos: 'bottom' },
+    { targetId: 'bottom-bar',  title: '⚙️ 하단 메뉴',        body: '설정, 테마 변경, 페이지 넘김 효과를 커스터마이즈할 수 있습니다.',            pos: 'top'    },
   ];
 
-  /** 오버레이 레이어 DOM 구성 (최초 1회) */
   function _buildDOM() {
     if (_overlay) return;
-
     _overlay = document.createElement('div');
     _overlay.id = 'onboarding-overlay';
     _overlay.setAttribute('role', 'dialog');
     _overlay.setAttribute('aria-label', '온보딩 가이드');
-    _overlay.style.cssText = [
-      'position:fixed;inset:0;z-index:9900',
-      'background:rgba(0,0,0,0.55)',
-      'pointer-events:all',
-      'transition:opacity 300ms ease',
-    ].join(';');
+    _overlay.style.cssText = 'position:fixed;inset:0;z-index:9900;background:rgba(0,0,0,0.55);pointer-events:all;transition:opacity 300ms ease';
 
-    /* 하이라이트 박스 */
     _box = document.createElement('div');
-    _box.style.cssText = [
-      'position:fixed;z-index:9910',
-      'border:2.5px solid var(--color-accent,#c47a3b)',
-      'border-radius:8px',
-      'box-shadow:0 0 0 4000px rgba(0,0,0,0.55)',
-      'pointer-events:none',
-      'transition:all 320ms cubic-bezier(0.4,0,0.2,1)',
-    ].join(';');
+    _box.style.cssText = 'position:fixed;z-index:9910;border:2.5px solid var(--color-accent,#c47a3b);border-radius:8px;box-shadow:0 0 0 4000px rgba(0,0,0,0.55);pointer-events:none;transition:all 320ms cubic-bezier(0.4,0,0.2,1)';
 
-    /* 툴팁 카드 */
     _tooltip = document.createElement('div');
-    _tooltip.style.cssText = [
-      'position:fixed;z-index:9920',
-      'background:var(--color-surface,#fff)',
-      'color:var(--color-ink,#1a1814)',
-      'border-radius:12px',
-      'padding:16px 20px',
-      'max-width:280px',
-      'box-shadow:0 8px 32px rgba(0,0,0,0.22)',
-      'font-size:14px;line-height:1.6',
-      'pointer-events:all',
-    ].join(';');
+    _tooltip.style.cssText = 'position:fixed;z-index:9920;background:var(--color-surface,#fff);color:var(--color-ink,#1a1814);border-radius:12px;padding:16px 20px;max-width:280px;box-shadow:0 8px 32px rgba(0,0,0,0.22);font-size:14px;line-height:1.6;pointer-events:all';
 
     document.body.appendChild(_overlay);
     document.body.appendChild(_box);
     document.body.appendChild(_tooltip);
-
-    /* 오버레이 클릭 시 다음 단계 진행 */
     _overlay.addEventListener('click', _next);
   }
 
-  /** 특정 단계 렌더링 */
   function _renderStep(stepIdx) {
     if (stepIdx >= STEPS.length) { _finish(); return; }
     const step   = STEPS[stepIdx];
     const target = document.getElementById(step.targetId);
+    if (!target) { _step++; _renderStep(_step); return; }
 
-    if (!target) { _next(); return; }
-
+    const PAD  = 8;
     const rect = target.getBoundingClientRect();
-    const PAD  = 6;
-
-    /* 하이라이트 박스 위치 */
-    _box.style.left   = `${rect.left - PAD}px`;
-    _box.style.top    = `${rect.top  - PAD}px`;
+    _box.style.top    = `${rect.top    - PAD}px`;
+    _box.style.left   = `${rect.left   - PAD}px`;
     _box.style.width  = `${rect.width  + PAD * 2}px`;
     _box.style.height = `${rect.height + PAD * 2}px`;
 
-    /* 툴팁 내용 */
     _tooltip.innerHTML = '';
-    const h = document.createElement('strong');
-    h.style.cssText = 'display:block;margin-bottom:6px;font-size:15px;';
+    const h = document.createElement('div');
+    h.style.cssText = 'font-size:15px;font-weight:700;margin-bottom:8px;';
     h.textContent = step.title;
     const p = document.createElement('p');
-    p.style.cssText = 'margin:0 0 12px;';
+    p.style.cssText = 'font-size:13px;color:var(--color-ink-soft,#555);margin:0 0 12px;';
     p.textContent = step.body;
-
     const progress = document.createElement('div');
     progress.style.cssText = 'display:flex;gap:5px;align-items:center;margin-bottom:12px;';
     STEPS.forEach((_, i) => {
       const dot = document.createElement('span');
-      dot.style.cssText = `display:inline-block;width:7px;height:7px;border-radius:50%;`
-        + `background:${i === stepIdx ? 'var(--color-accent,#c47a3b)' : 'var(--color-border-soft,#ccc)'};`;
+      dot.style.cssText = `display:inline-block;width:7px;height:7px;border-radius:50%;background:${i === stepIdx ? 'var(--color-accent,#c47a3b)' : 'var(--color-border-soft,#ccc)'};`;
       progress.appendChild(dot);
     });
-
-    const btnRow = document.createElement('div');
+    const btnRow  = document.createElement('div');
     btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
-
     const skipBtn = document.createElement('button');
     skipBtn.textContent = '건너뛰기';
     skipBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--color-border,#ccc);border-radius:6px;background:none;cursor:pointer;font-size:12px;';
     skipBtn.addEventListener('click', _finish);
-
     const nextBtn = document.createElement('button');
     nextBtn.textContent = stepIdx < STEPS.length - 1 ? '다음 →' : '시작하기 🎉';
     nextBtn.style.cssText = 'padding:6px 14px;border:none;border-radius:6px;background:var(--color-accent,#c47a3b);color:#fff;cursor:pointer;font-size:12px;font-weight:600;';
     nextBtn.addEventListener('click', _next);
-
     btnRow.appendChild(skipBtn);
     btnRow.appendChild(nextBtn);
-
     _tooltip.appendChild(h);
     _tooltip.appendChild(p);
     _tooltip.appendChild(progress);
     _tooltip.appendChild(btnRow);
 
-    /* 툴팁 위치 결정 (top/bottom) */
-    const TH = 180; /* 툴팁 추정 높이 */
+    const TH = 180;
     if (step.pos === 'bottom') {
       let top = rect.bottom + PAD + 12;
       if (top + TH > window.innerHeight - 16) top = rect.top - TH - 12;
-      _tooltip.style.top  = `${Math.max(8, top)}px`;
+      _tooltip.style.top = `${Math.max(8, top)}px`;
     } else {
       let top = rect.top - TH - 12;
       if (top < 8) top = rect.bottom + PAD + 12;
-      _tooltip.style.top  = `${top}px`;
+      _tooltip.style.top = `${top}px`;
     }
     let left = rect.left;
     if (left + 280 > window.innerWidth - 8) left = window.innerWidth - 288;
@@ -534,14 +489,11 @@ const OnboardingGuide = (() => {
     });
     _overlay = null; _box = null; _tooltip = null; _step = 0;
     clearTimeout(_timer);
-    /* 완료 영구 저장 */
     store.onboardingDone = true;
     try { localStorage.setItem('fable_onboarding_done', '1'); } catch (_) {}
   }
 
-  /** 외부 진입점 — viewer 초기화 후 600ms 딜레이로 자동 구동 */
   function init() {
-    /* 이미 완료 처리되었으면 생략 */
     if (store.onboardingDone || localStorage.getItem('fable_onboarding_done') === '1') {
       store.onboardingDone = true;
       return;
@@ -553,7 +505,6 @@ const OnboardingGuide = (() => {
     }, 600);
   }
 
-  /** 수동 재실행 (설정에서 '가이드 다시 보기' 클릭 시) */
   function rerun() {
     store.onboardingDone = false;
     try { localStorage.removeItem('fable_onboarding_done'); } catch (_) {}
@@ -569,45 +520,34 @@ const OnboardingGuide = (() => {
 
 /* ══════════════════════════════════════════════════════════
    §23-C. ReadingReport — 일자별 독서 데이터 시각화 위젯
-   ─────────────────────────────────────────────────────────
-   · 일별 독서 시간(분) SVG 바 차트
-   · 일별 읽은 글자 수(estimatedChars) 보조 차트
-   · 7일 / 30일 토글
    ══════════════════════════════════════════════════════════ */
 const ReadingReport = (() => {
-  let _containerId = 'reading-report-widget';
-  let _currentRange = 7; /* 7 또는 30 */
+  let _currentRange = 7;
 
-  /**
-   * @param {Object} readingLog  { 'YYYY-MM-DD': { seconds, chars? } }
-   * @param {string} [containerId]
-   */
-  function render(readingLog, containerId = _containerId) {
+  function render(readingLog, containerId = 'reading-report-widget') {
     const container = document.getElementById(containerId);
     if (!container) return;
 
-    const days = _buildDayArray(readingLog, _currentRange);
-    const maxSec  = Math.max(60, ...days.map(d => d.sec));
-    const maxChar = Math.max(1,  ...days.map(d => d.chars));
-    const todaySec = days[days.length - 1]?.sec || 0;
-    const totalSec = days.reduce((s, d) => s + d.sec, 0);
+    const days      = _buildDayArray(readingLog, _currentRange);
+    const maxSec    = Math.max(60,  ...days.map(d => d.sec));
+    const maxChar   = Math.max(1,   ...days.map(d => d.chars));
+    const todaySec  = days[days.length - 1]?.sec || 0;
+    const totalSec  = days.reduce((s, d) => s + d.sec, 0);
     const totalChar = days.reduce((s, d) => s + d.chars, 0);
-    const streak = _calcStreak(readingLog);
+    const streak    = _calcStreak(readingLog);
 
-    /* ── SVG 바 차트 생성 ── */
-    const BAR_W = _currentRange <= 7 ? 28 : 12;
-    const BAR_GAP = _currentRange <= 7 ? 8 : 4;
-    const CHART_H = 80;
-    const CHART_W = days.length * (BAR_W + BAR_GAP) - BAR_GAP;
+    const BAR_W    = _currentRange <= 7 ? 28 : 12;
+    const BAR_GAP  = _currentRange <= 7 ? 8  : 4;
+    const CHART_H  = 80;
+    const CHART_W  = days.length * (BAR_W + BAR_GAP) - BAR_GAP;
 
     let svgBars = '';
     days.forEach((d, i) => {
-      const h   = Math.max(3, Math.round((d.sec  / maxSec)  * CHART_H));
-      const hc  = Math.max(2, Math.round((d.chars / maxChar) * (CHART_H * 0.5)));
-      const x   = i * (BAR_W + BAR_GAP);
-      const min = Math.round(d.sec / 60);
+      const h       = Math.max(3, Math.round((d.sec  / maxSec)  * CHART_H));
+      const hc      = Math.max(2, Math.round((d.chars / maxChar) * (CHART_H * 0.5)));
+      const x       = i * (BAR_W + BAR_GAP);
+      const min     = Math.round(d.sec / 60);
       const isToday = d.key === new Date().toISOString().slice(0, 10);
-
       svgBars += `
         <g class="report-bar-group" data-min="${min}" data-chars="${d.chars}" data-date="${d.key}">
           <title>${d.label}: ${min}분, ${d.chars.toLocaleString()}자</title>
@@ -622,36 +562,30 @@ const ReadingReport = (() => {
             fill="var(--color-ink-muted,#888)">${d.label}</text>
         </g>`;
     });
-
     const SVG_H = CHART_H + 50;
 
     container.innerHTML = '';
 
-    /* ── 컨테이너 렌더링 ── */
-    const header = document.createElement('div');
+    const header  = document.createElement('div');
     header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;';
     const titleEl = document.createElement('span');
     titleEl.style.cssText = 'font-size:13px;font-weight:600;color:var(--color-ink,#1a1814);';
     titleEl.textContent = `독서 리포트 — 최근 ${_currentRange}일`;
-
-    const toggle = document.createElement('div');
+    const toggle  = document.createElement('div');
     toggle.style.cssText = 'display:flex;gap:4px;';
     [7, 30].forEach(n => {
       const btn = document.createElement('button');
       btn.textContent = `${n}일`;
-      btn.style.cssText = `padding:3px 8px;border-radius:5px;border:1px solid var(--color-border,#ccc);`
-        + `font-size:11px;cursor:pointer;`
+      btn.style.cssText = `padding:3px 8px;border-radius:5px;border:1px solid var(--color-border,#ccc);font-size:11px;cursor:pointer;`
         + `background:${n === _currentRange ? 'var(--color-accent,#c47a3b)' : 'none'};`
         + `color:${n === _currentRange ? '#fff' : 'var(--color-ink-muted,#888)'};`;
       btn.addEventListener('click', () => { _currentRange = n; render(readingLog, containerId); });
       toggle.appendChild(btn);
     });
-
     header.appendChild(titleEl);
     header.appendChild(toggle);
     container.appendChild(header);
 
-    /* SVG 차트 */
     const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svgEl.setAttribute('viewBox', `0 0 ${CHART_W} ${SVG_H}`);
     svgEl.setAttribute('width', '100%');
@@ -660,13 +594,12 @@ const ReadingReport = (() => {
     svgEl.innerHTML = svgBars;
     container.appendChild(svgEl);
 
-    /* 요약 카드 행 */
     const summaryRow = document.createElement('div');
     summaryRow.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;';
     const stats = [
-      { label: '오늘', value: `${Math.round(todaySec / 60)}분` },
+      { label: '오늘',              value: `${Math.round(todaySec / 60)}분`   },
       { label: `${_currentRange}일 합계`, value: `${Math.round(totalSec / 60)}분` },
-      { label: '연속 독서', value: `${streak}일 🔥` },
+      { label: '연속 독서',          value: `${streak}일 🔥`                  },
     ];
     stats.forEach(s => {
       const card = document.createElement('div');
@@ -682,7 +615,6 @@ const ReadingReport = (() => {
     });
     container.appendChild(summaryRow);
 
-    /* 글자 수 요약 */
     if (totalChar > 0) {
       const charNote = document.createElement('p');
       charNote.style.cssText = 'margin:8px 0 0;font-size:11px;color:var(--color-ink-muted,#888);text-align:right;';
@@ -691,39 +623,33 @@ const ReadingReport = (() => {
     }
   }
 
-  /** readingLog에서 날짜 배열 구성 */
   function _buildDayArray(log, n) {
-    const today = new Date();
+    const today  = new Date();
     const result = [];
     for (let i = n - 1; i >= 0; i--) {
-      const d = new Date(today);
+      const d   = new Date(today);
       d.setDate(today.getDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      const rec = log[key] || {};
-      const sec = typeof rec === 'number' ? rec : (rec.seconds || 0);
+      const key  = d.toISOString().slice(0, 10);
+      const rec  = log[key] || {};
+      const sec  = typeof rec === 'number' ? rec : (rec.seconds || 0);
       const chars = rec.chars || 0;
       result.push({
-        key,
-        sec,
-        chars,
-        label: n <= 7
-          ? ['일','월','화','수','목','금','토'][d.getDay()]
-          : String(d.getDate()),
+        key, sec, chars,
+        label: n <= 7 ? ['일','월','화','수','목','금','토'][d.getDay()] : String(d.getDate()),
       });
     }
     return result;
   }
 
-  /** 연속 독서 일수 계산 */
   function _calcStreak(log) {
     let streak = 0;
     const today = new Date();
     for (let i = 0; i < 365; i++) {
-      const d = new Date(today);
+      const d   = new Date(today);
       d.setDate(today.getDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      const rec = log[key];
-      const sec = typeof rec === 'number' ? rec : (rec?.seconds || 0);
+      const key  = d.toISOString().slice(0, 10);
+      const rec  = log[key];
+      const sec  = typeof rec === 'number' ? rec : (rec?.seconds || 0);
       if (sec > 0) streak++;
       else break;
     }
@@ -735,46 +661,22 @@ const ReadingReport = (() => {
 
 /* ══════════════════════════════════════════════════════════
    §23-D. 3D 종이 넘김 페이지 전환 레이어
-   ─────────────────────────────────────────────────────────
-   store.pageTransition ∈ { 'fade', 'slide', 'flip3d' }
-   epub.js rendition.on('relocated') 직전에 CSS 전환 레이어를
-   뷰어 위에 동적 삽입하여 애니메이션을 실행한 후 자동 제거.
    ══════════════════════════════════════════════════════════ */
 const PageTransitionEngine = (() => {
-  /* 한 번에 하나의 전환만 실행 */
   let _busy = false;
-
-  /* 전환별 CSS 주입 (한 번만) */
   const CSS = `
     @keyframes fable-fade-in { from { opacity:0; } to { opacity:1; } }
-
-    @keyframes fable-slide-in {
-      from { transform: translateX(6%); opacity:0; }
-      to   { transform: translateX(0);  opacity:1; }
-    }
-
-    @keyframes fable-flip3d-out {
-      0%   { transform: perspective(900px) rotateY(0deg);   opacity:1; }
-      100% { transform: perspective(900px) rotateY(-90deg); opacity:0; }
-    }
-    @keyframes fable-flip3d-in {
-      0%   { transform: perspective(900px) rotateY(90deg);  opacity:0; }
-      100% { transform: perspective(900px) rotateY(0deg);   opacity:1; }
-    }
-
-    .fable-ptx-layer {
-      position:absolute; inset:0; z-index:8000;
-      pointer-events:none;
-      background:var(--color-page, #f4f1ea);
-      transform-origin:left center;
-    }
+    @keyframes fable-slide-in { from { transform: translateX(6%); opacity:0; } to { transform: translateX(0); opacity:1; } }
+    @keyframes fable-flip3d-out { 0% { transform: perspective(900px) rotateY(0deg); opacity:1; } 100% { transform: perspective(900px) rotateY(-90deg); opacity:0; } }
+    @keyframes fable-flip3d-in  { 0% { transform: perspective(900px) rotateY(90deg); opacity:0; } 100% { transform: perspective(900px) rotateY(0deg);  opacity:1; } }
+    .fable-ptx-layer { position:absolute; inset:0; z-index:8000; pointer-events:none; background:var(--color-page, #f4f1ea); transform-origin:left center; }
     .fable-ptx--fade    { animation: fable-fade-in   260ms ease forwards; }
     .fable-ptx--slide   { animation: fable-slide-in  280ms cubic-bezier(0.25,0.46,0.45,0.94) forwards; }
     .fable-ptx--flip-out { animation: fable-flip3d-out 200ms ease forwards; }
     .fable-ptx--flip-in  { animation: fable-flip3d-in  220ms ease 80ms forwards; opacity:0; }
   `;
-
   let _cssInjected = false;
+
   function _injectCSS() {
     if (_cssInjected) return;
     const style = document.createElement('style');
@@ -783,23 +685,18 @@ const PageTransitionEngine = (() => {
     _cssInjected = true;
   }
 
-  /**
-   * 전환 실행
-   * @param {'prev'|'next'} direction
-   */
   function run(direction = 'next') {
     if (_busy) return;
     const mode = store.pageTransition || 'fade';
-    if (mode === 'fade')   { _runFade(); return; }
-    if (mode === 'slide')  { _runSlide(direction); return; }
+    if (mode === 'fade')   { _runFade();            return; }
+    if (mode === 'slide')  { _runSlide(direction);  return; }
     if (mode === 'flip3d') { _runFlip3D(direction); return; }
   }
 
   function _getViewport() { return DOMProxy.get('viewer-viewport'); }
 
   function _runFade() {
-    _injectCSS();
-    _busy = true;
+    _injectCSS(); _busy = true;
     const vp = _getViewport();
     const layer = document.createElement('div');
     layer.className = 'fable-ptx-layer fable-ptx--fade';
@@ -809,8 +706,7 @@ const PageTransitionEngine = (() => {
   }
 
   function _runSlide(direction) {
-    _injectCSS();
-    _busy = true;
+    _injectCSS(); _busy = true;
     const vp = _getViewport();
     const layer = document.createElement('div');
     layer.className = 'fable-ptx-layer fable-ptx--slide';
@@ -821,22 +717,16 @@ const PageTransitionEngine = (() => {
   }
 
   function _runFlip3D(direction) {
-    _injectCSS();
-    _busy = true;
+    _injectCSS(); _busy = true;
     const vp = _getViewport();
-
-    /* OUT 레이어 (현재 페이지가 뒤집혀 나가는 효과) */
     const layerOut = document.createElement('div');
     layerOut.className = 'fable-ptx-layer fable-ptx--flip-out';
     layerOut.style.transformOrigin = direction === 'next' ? 'left center' : 'right center';
     vp.appendChild(layerOut);
-
-    /* IN 레이어 (새 페이지가 들어오는 효과) */
     const layerIn = document.createElement('div');
     layerIn.className = 'fable-ptx-layer fable-ptx--flip-in';
     layerIn.style.transformOrigin = direction === 'next' ? 'right center' : 'left center';
     vp.appendChild(layerIn);
-
     layerOut.addEventListener('animationend', () => layerOut.remove(), { once: true });
     layerIn.addEventListener('animationend',  () => { layerIn.remove(); _busy = false; }, { once: true });
     setTimeout(() => {
@@ -862,9 +752,8 @@ const TTSSystem = (() => {
     utterance.lang = 'ko-KR';
     utterance.rate = 1.0;
     utterance.onboundary = (e) => {
-      if (e.charIndex != null) {
+      if (e.charIndex != null)
         DOMProxy.get('tts-progress-fill').style.width = `${Math.min(100, (e.charIndex / totalLen) * 100)}%`;
-      }
     };
     utterance.onend = utterance.onerror = () => {
       DOMProxy.get('tts-player-bar').style.display = 'none';
@@ -888,7 +777,10 @@ const TTSSystem = (() => {
     }
   }
 
-  function stop() { window.speechSynthesis.cancel(); DOMProxy.get('tts-player-bar').style.display = 'none'; }
+  function stop() {
+    window.speechSynthesis.cancel();
+    DOMProxy.get('tts-player-bar').style.display = 'none';
+  }
 
   return { play, pauseResume, stop };
 })();
@@ -908,7 +800,6 @@ const ReadingStatsTracker = (() => {
         store.readingSession.accumulated++;
         pendingSeconds++;
         _updateUI();
-        /* 30초마다 일별 독서로그 일괄 적재 */
         if (pendingSeconds >= 30) {
           StorageSystem.addReadingSeconds(pendingSeconds);
           pendingSeconds = 0;
@@ -932,8 +823,8 @@ const ReadingStatsTracker = (() => {
     setTextSafe(DOMProxy.get('stat-reading-time'), `${min}분 ${sec}초`);
     setTextSafe(DOMProxy.get('stat-pages-read'), String(store.readingSession.positions.size));
     const goalMin = parseInt(localStorage.getItem('fable_daily_goal') || '30', 10);
-    const fill = DOMProxy.get('goal-progress-fill');
-    const pct  = Math.min(100, (min / goalMin) * 100);
+    const fill    = DOMProxy.get('goal-progress-fill');
+    const pct     = Math.min(100, (min / goalMin) * 100);
     fill.style.transition = 'width 600ms cubic-bezier(0.34,1.56,0.64,1)';
     fill.style.width = `${pct}%`;
     DOMProxy.q('.goal-track').setAttribute('aria-valuenow', Math.round(pct));
@@ -954,8 +845,17 @@ function initContextMenu() {
   if (!DOMProxy.exists('screen-viewer')) return;
   let longPressTimer = null, selectedText = '';
 
-  function showMenu() { if (!selectedText) return; const m = DOMProxy.get('context-menu'); m.style.display = 'flex'; m.classList.add('slide-up'); }
-  function hideMenu() { const m = DOMProxy.get('context-menu'); m.classList.remove('slide-up'); setTimeout(() => { m.style.display = 'none'; }, 280); }
+  function showMenu() {
+    if (!selectedText) return;
+    const m = DOMProxy.get('context-menu');
+    m.style.display = 'flex';
+    m.classList.add('slide-up');
+  }
+  function hideMenu() {
+    const m = DOMProxy.get('context-menu');
+    m.classList.remove('slide-up');
+    setTimeout(() => { m.style.display = 'none'; }, 280);
+  }
 
   const onStart = () => {
     longPressTimer = setTimeout(() => {
@@ -972,8 +872,8 @@ function initContextMenu() {
   };
 
   ResourceRegistry.addListener(viewer, 'touchstart', onStart, { passive: true });
-  ResourceRegistry.addListener(viewer, 'touchend',  () => clearTimeout(longPressTimer), { passive: true });
-  ResourceRegistry.addListener(viewer, 'touchmove', () => clearTimeout(longPressTimer), { passive: true });
+  ResourceRegistry.addListener(viewer, 'touchend',   () => clearTimeout(longPressTimer), { passive: true });
+  ResourceRegistry.addListener(viewer, 'touchmove',  () => clearTimeout(longPressTimer), { passive: true });
   ResourceRegistry.addListener(document, 'pointerdown', (e) => {
     if (!DOMProxy.get('context-menu').contains?.(e.target)) { hideMenu(); selectedText = ''; }
   }, { passive: true });
@@ -1033,8 +933,6 @@ const AnnotationManager = (() => {
 
   return { init, restoreAll, reset };
 })();
-
-function initAnnotationManager(rendition) { AnnotationManager.init(rendition); }
 
 /* §34. 스크롤 맨위로 버튼 */
 function bindScrollTopButton(view) {
@@ -1160,7 +1058,6 @@ const AnnotationExporter = (() => {
     } else if (format === 'pdf') {
       _exportPdf(_book, sorted, safeTitle);
     }
-
     Toast.show('내보내기가 완료되었습니다.', 'success');
     close();
   }
@@ -1179,32 +1076,25 @@ const AnnotationExporter = (() => {
       if (a.note) lines.push(`   [Note] ${a.note}`);
       lines.push('');
     });
-
     let stream = 'BT /F1 11 Tf 50 780 Td 14 TL\n';
     lines.forEach(line => {
       const safe = line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
       stream += `(${safe}) Tj T*\n`;
     });
     stream += 'ET';
-
     const objects = [];
     objects.push('<< /Type /Catalog /Pages 2 0 R >>');
     objects.push('<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
     objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>');
     objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
     objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-
     let pdf = '%PDF-1.4\n';
     const offsets = [];
-    objects.forEach((obj, i) => {
-      offsets.push(pdf.length);
-      pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`;
-    });
+    objects.forEach((obj, i) => { offsets.push(pdf.length); pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`; });
     const xrefPos = pdf.length;
     pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
     offsets.forEach(off => { pdf += String(off).padStart(10, '0') + ' 00000 n \n'; });
     pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
-
     _download(`${safeTitle}_notes.pdf`, pdf, 'application/pdf');
   }
 
@@ -1220,12 +1110,15 @@ const AnnotationExporter = (() => {
 })();
 
 /* ══════════════════════════════════════════════════════════
-   §37. LibraryFullTextSearch (전 도서 본문 → CFI 점프)
+   §37. LibraryFullTextSearch
    ══════════════════════════════════════════════════════════ */
 const LibraryFullTextSearch = (() => {
   let _running = false;
 
-  function open()  { DOMProxy.get('fts-modal').style.display = 'flex'; setTimeout(() => DOMProxy.get('fts-input').focus(), 60); }
+  function open()  {
+    DOMProxy.get('fts-modal').style.display = 'flex';
+    setTimeout(() => DOMProxy.get('fts-input').focus(), 60);
+  }
   function close() { DOMProxy.get('fts-modal').style.display = 'none'; }
 
   async function run() {
@@ -1235,13 +1128,10 @@ const LibraryFullTextSearch = (() => {
     _running = true;
     const resultsEl = DOMProxy.get('fts-results');
     resultsEl.innerHTML = '<p class="fts-status">전체 서재 본문을 검색 중입니다...</p>';
-
-    const books = store.libraryBooks || [];
+    const books   = store.libraryBooks || [];
     const allHits = [];
-
-    const ready = await waitForEpubJS();
+    const ready   = await waitForEpubJS();
     if (!ready) { resultsEl.innerHTML = '<p class="fts-status">epub.js 로드 실패</p>'; _running = false; return; }
-
     for (const b of books) {
       await ErrorBoundary.wrap('renderer', async () => {
         const book = window.ePub(b.bytes.slice(0));
@@ -1276,7 +1166,6 @@ const LibraryFullTextSearch = (() => {
       })();
       await new Promise(r => setTimeout(r, 0));
     }
-
     _running = false;
     _renderResults(allHits, q);
   }
@@ -1285,20 +1174,25 @@ const LibraryFullTextSearch = (() => {
     const resultsEl = DOMProxy.get('fts-results');
     resultsEl.innerHTML = '';
     if (!hits.length) { resultsEl.innerHTML = '<p class="fts-status">검색 결과가 없습니다.</p>'; return; }
-
     VirtualListRenderer.render(resultsEl, hits, (hit) => {
-      const item = document.createElement('div');
+      const item  = document.createElement('div');
       item.className = 'fts-result-item';
       const title = document.createElement('div');
       title.className = 'fts-result-title';
       title.textContent = `📖 ${hit.title || '제목 없음'}`;
-      const snip = document.createElement('div');
+      const snip  = document.createElement('div');
       snip.className = 'fts-result-snippet';
       const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
       snip.innerHTML = '';
       hit.snippet.split(re).forEach(part => {
-        if (re.test(part)) { const m = document.createElement('mark'); m.textContent = part; snip.appendChild(m); re.lastIndex = 0; }
-        else snip.appendChild(document.createTextNode(part));
+        if (re.test(part)) {
+          const m = document.createElement('mark');
+          m.textContent = part;
+          snip.appendChild(m);
+          re.lastIndex = 0;
+        } else {
+          snip.appendChild(document.createTextNode(part));
+        }
       });
       item.appendChild(title);
       item.appendChild(snip);
@@ -1325,7 +1219,7 @@ const LibraryFullTextSearch = (() => {
 })();
 
 /* ══════════════════════════════════════════════════════════
-   §38. 범용 가상 스크롤 렌더러 (VirtualListRenderer)
+   §38. VirtualListRenderer
    ══════════════════════════════════════════════════════════ */
 const VirtualListRenderer = (() => {
   const CHUNK  = 20;
@@ -1335,20 +1229,16 @@ const VirtualListRenderer = (() => {
     if (!container) return;
     container.innerHTML = '';
     let rendered = 0;
-
     const sentinel = document.createElement('div');
     sentinel.style.height = '1px';
-
     function renderChunk() {
       const end  = Math.min(rendered + CHUNK, items.length);
       const frag = document.createDocumentFragment();
       for (; rendered < end; rendered++) frag.appendChild(builderFn(items[rendered]));
       container.insertBefore(frag, sentinel);
     }
-
     renderChunk();
     container.appendChild(sentinel);
-
     const obs = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && rendered < items.length) {
         renderChunk();
@@ -1368,7 +1258,7 @@ const VirtualListRenderer = (() => {
 })();
 
 /* ══════════════════════════════════════════════════════════
-   §39. CloudBackup (WebDAV + Google Drive 프레임워크)
+   §39. CloudBackup
    ══════════════════════════════════════════════════════════ */
 const CloudBackup = (() => {
   async function backupToFile() {
@@ -1398,38 +1288,6 @@ const CloudBackup = (() => {
     }
   }
 
-  const WebDAV = {
-    async upload(url, user, pass, data) {
-      const auth = 'Basic ' + btoa(`${user}:${pass}`);
-      return fetch(url, { method: 'PUT', headers: { 'Authorization': auth, 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-    },
-    async download(url, user, pass) {
-      const auth = 'Basic ' + btoa(`${user}:${pass}`);
-      const res  = await fetch(url, { headers: { 'Authorization': auth } });
-      if (!res.ok) throw new Error(`WebDAV ${res.status}`);
-      return res.json();
-    },
-  };
-
-  const GoogleDrive = {
-    async upload(accessToken, data) {
-      const metadata = { name: `fable_backup_${Date.now()}.json`, mimeType: 'application/json' };
-      const form = new FormData();
-      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-      form.append('file',     new Blob([JSON.stringify(data)], { type: 'application/json' }));
-      return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-        method: 'POST', headers: { 'Authorization': `Bearer ${accessToken}` }, body: form,
-      });
-    },
-    async download(accessToken, fileId) {
-      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-      });
-      if (!res.ok) throw new Error(`Drive ${res.status}`);
-      return res.json();
-    },
-  };
-
   function init() {
     if (DOMProxy.exists('restore-file-input')) {
       DOMProxy.get('restore-file-input').addEventListener('change', (e) => {
@@ -1439,7 +1297,7 @@ const CloudBackup = (() => {
     }
   }
 
-  return { backupToFile, restoreFromFile, WebDAV, GoogleDrive, init };
+  return { backupToFile, restoreFromFile, init };
 })();
 
 /* ══════════════════════════════════════════════════════════
@@ -1458,8 +1316,13 @@ const Pomodoro = (() => {
     remaining--;
     setTextSafe(DOMProxy.get('pomodoro-time'), _fmt(remaining));
     if (remaining <= 0) {
-      if (mode === 'focus') { Toast.show('🍅 집중 시간 완료! 5분 휴식하세요.', 'success'); mode = 'break'; remaining = BREAK; }
-      else { Toast.show('휴식 끝! 다시 집중해 볼까요?', 'info'); mode = 'focus'; remaining = FOCUS; }
+      if (mode === 'focus') {
+        Toast.show('🍅 집중 시간 완료! 5분 휴식하세요.', 'success');
+        mode = 'break'; remaining = BREAK;
+      } else {
+        Toast.show('휴식 끝! 다시 집중해 볼까요?', 'info');
+        mode = 'focus'; remaining = FOCUS;
+      }
       store.pomodoroState = mode;
       _updateModeLabel();
     }
@@ -1476,7 +1339,11 @@ const Pomodoro = (() => {
     setTextSafe(DOMProxy.get('btn-pomodoro-toggle'), '⏸');
   }
 
-  function pause() { clearInterval(timer); timer = null; setTextSafe(DOMProxy.get('btn-pomodoro-toggle'), '▶'); }
+  function pause() {
+    clearInterval(timer);
+    timer = null;
+    setTextSafe(DOMProxy.get('btn-pomodoro-toggle'), '▶');
+  }
 
   function reset() {
     clearInterval(timer); timer = null; mode = 'idle'; remaining = FOCUS;
@@ -1490,6 +1357,11 @@ const Pomodoro = (() => {
     const popup = DOMProxy.get('pomodoro-popup');
     if (popup.style.display === 'flex' && timer) pause();
     else start();
+  }
+
+  function openPopup() {
+    const popup = DOMProxy.get('pomodoro-popup');
+    popup.style.display = popup.style.display === 'flex' ? 'none' : 'flex';
   }
 
   function _updateModeLabel() {
@@ -1507,11 +1379,6 @@ const Pomodoro = (() => {
       pause();
       DOMProxy.get('pomodoro-popup').style.display = 'none';
     });
-  }
-
-  function openPopup() {
-    const popup = DOMProxy.get('pomodoro-popup');
-    popup.style.display = popup.style.display === 'flex' ? 'none' : 'flex';
   }
 
   return { init, start, pause, reset, toggle, openPopup };
@@ -1534,7 +1401,6 @@ export {
   ReadingStatsTracker,
   initContextMenu,
   AnnotationManager,
-  initAnnotationManager,
   bindScrollTopButton,
   MetadataEditor,
   AnnotationExporter,
