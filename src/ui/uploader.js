@@ -1246,7 +1246,7 @@ export {
 };
 
 /* computeFileHash 폴백 export (외부 참조 호환) */
-export function computeFileHash(file) {
+function computeFileHash(file) {
   const seed = `${file.name}::${file.size}`;
   let hash = 5381;
   for (let i = 0; i < seed.length; i++) hash = ((hash << 5) + hash) + seed.charCodeAt(i);
