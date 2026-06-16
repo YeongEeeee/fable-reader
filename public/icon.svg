@@ -1,0 +1,99 @@
+<svg viewBox="0 0 512 512" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Fable Premium</title>
+  <desc>Minimalist open book with an abstract F letterform integrated into the spine, rendered in sepia amber and deep ink tones for Fable Premium EPUB reader.</desc>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2a2318"/>
+      <stop offset="100%" stop-color="#1f1a14"/>
+    </linearGradient>
+    <linearGradient id="amberGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e09a5a"/>
+      <stop offset="100%" stop-color="#c8864a"/>
+    </linearGradient>
+    <linearGradient id="pageLeft" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f5ede0"/>
+      <stop offset="100%" stop-color="#e8d8c0"/>
+    </linearGradient>
+    <linearGradient id="pageRight" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#e8d8c0"/>
+      <stop offset="100%" stop-color="#d4c4a8"/>
+    </linearGradient>
+    <linearGradient id="spineGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#c8864a"/>
+      <stop offset="100%" stop-color="#a86c38"/>
+    </linearGradient>
+    <clipPath id="leftClip">
+      <path d="M96 152 Q96 144 104 144 L248 144 L248 372 L104 372 Q96 372 96 364 Z"/>
+    </clipPath>
+    <clipPath id="rightClip">
+      <path d="M264 144 L408 144 Q416 144 416 152 L416 364 Q416 372 408 372 L264 372 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- App background rounded rect -->
+  <rect width="512" height="512" rx="88" fill="url(#bgGrad)"/>
+
+  <!-- Book shadow -->
+  <rect x="80" y="388" width="352" height="18" rx="9" fill="#c8864a" opacity="0.18"/>
+  <rect x="100" y="398" width="312" height="10" rx="5" fill="#c8864a" opacity="0.10"/>
+
+  <!-- Left page -->
+  <path d="M96 152 Q96 144 104 144 L248 144 L248 372 L104 372 Q96 372 96 364 Z" fill="url(#pageLeft)"/>
+
+  <!-- Right page -->
+  <path d="M264 144 L408 144 Q416 144 416 152 L416 364 Q416 372 408 372 L264 372 Z" fill="url(#pageRight)"/>
+
+  <!-- Spine -->
+  <rect x="244" y="136" width="24" height="244" rx="12" fill="url(#spineGrad)"/>
+
+  <!-- Spine inner shadow lines -->
+  <path d="M248 144 Q256 152 256 172 Q256 192 248 200" fill="none" stroke="#a86c38" stroke-width="1.5" opacity="0.5"/>
+  <path d="M264 144 Q256 152 256 172 Q256 192 264 200" fill="none" stroke="#a86c38" stroke-width="1.5" opacity="0.5"/>
+
+  <!-- Left page text lines (clipped) -->
+  <g clip-path="url(#leftClip)" opacity="0.55">
+    <line x1="116" y1="188" x2="238" y2="188" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="206" x2="238" y2="206" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="224" x2="210" y2="224" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="242" x2="238" y2="242" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="260" x2="238" y2="260" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="278" x2="200" y2="278" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="296" x2="238" y2="296" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="314" x2="238" y2="314" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="332" x2="218" y2="332" stroke="#b8a488" stroke-width="1.5"/>
+    <line x1="116" y1="350" x2="238" y2="350" stroke="#b8a488" stroke-width="1.5"/>
+  </g>
+
+  <!-- Right page text lines (clipped, dimmer = shadow page effect) -->
+  <g clip-path="url(#rightClip)" opacity="0.38">
+    <line x1="274" y1="188" x2="396" y2="188" stroke="#9a8870" stroke-width="1.5"/>
+    <line x1="274" y1="206" x2="396" y2="206" stroke="#9a8870" stroke-width="1.5"/>
+    <line x1="274" y1="224" x2="360" y2="224" stroke="#9a8870" stroke-width="1.5"/>
+    <line x1="274" y1="242" x2="396" y2="242" stroke="#9a8870" stroke-width="1.5"/>
+    <line x1="274" y1="260" x2="396" y2="260" stroke="#9a8870" stroke-width="1.5"/>
+    <line x1="274" y1="278" x2="350" y2="278" stroke="#9a8870" stroke-width="1.5"/>
+    <line x1="274" y1="296" x2="396" y2="296" stroke="#9a8870" stroke-width="1.5"/>
+    <line x1="274" y1="314" x2="396" y2="314" stroke="#9a8870" stroke-width="1.5"/>
+  </g>
+
+  <!-- Abstract F letterform — header bar + descender + crossbar (top-left of left page) -->
+  <g>
+    <!-- Top horizontal bar of F -->
+    <line x1="120" y1="163" x2="238" y2="163" stroke="url(#amberGrad)" stroke-width="3.5" stroke-linecap="round"/>
+    <!-- Vertical stem of F -->
+    <line x1="120" y1="163" x2="120" y2="196" stroke="url(#amberGrad)" stroke-width="3.5" stroke-linecap="round"/>
+    <!-- Mid crossbar of F -->
+    <line x1="120" y1="179" x2="210" y2="179" stroke="url(#amberGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- Accent dot — premium marker top right of right page -->
+  <circle cx="380" cy="168" r="6" fill="#c8864a" opacity="0.75"/>
+  <circle cx="380" cy="168" r="3" fill="#e09a5a"/>
+
+  <!-- Bookmark ribbon at bottom spine -->
+  <path d="M256 380 L236 404 Q256 412 276 404 Z" fill="#c8864a" opacity="0.6"/>
+
+  <!-- Subtle page border highlights -->
+  <rect x="80" y="144" width="168" height="228" rx="10" fill="none" stroke="#c8864a" stroke-width="1.5" opacity="0.20"/>
+  <rect x="264" y="144" width="152" height="228" rx="10" fill="none" stroke="#c8864a" stroke-width="1.5" opacity="0.12"/>
+</svg>
