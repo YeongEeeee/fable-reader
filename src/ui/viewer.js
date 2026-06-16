@@ -1,5 +1,5 @@
 /**
- * src/ui/viewer.js  ── Fable Premium v4.1
+ * src/ui/viewer.js  ── Fable Premium v4.2
  * ─────────────────────────────────────────────────────────────────
  * 독서(뷰어) UI + 부가 기능 모듈
  *
@@ -9,18 +9,21 @@
  *   [3D 페이지 전환]   pageTransition 상태에 따라 fade / slide / flip3d CSS 3D 레이어 연동
  *   [SearchEngine Worker] Spine 전역 검색 정규식 연산을 Web Worker로 이관 → UI 프리징 제로
  *
- * 보존된 스펙:
- *   TOC 사이드바, 가상 검색 리스트, TTS, 독서 통계 트래커,
- *   롱프레스 컨텍스트 메뉴, AnnotationManager(LWW 동기화 연동),
- *   MetadataEditor, AnnotationExporter(MD/JSON/PDF),
- *   LibraryFullTextSearch, VirtualListRenderer,
- *   CloudBackup(WebDAV/Drive), Pomodoro, 스크롤 맨위로 버튼
- *
  * [버그 수정 v4.1]
  *   - updateTocActiveItem: 현재 챕터 자동 스크롤 정렬(scrollTop 보정) 추가
  *   - initAnnotationManager 래퍼 제거 — main.js가 AnnotationManager를
  *     deps로 직접 주입하므로 중복 래퍼 불필요 (export 목록에서 삭제)
  *   - truncateTitle import 제거 — viewer.js 내부 미사용
+ *
+ * [고도화 v4.2]
+ *   - TTSSystem: stop() 메서드에 store.isTtsPlaying = false 상태 연동 추가
+ *   - TTSSystem: play() / pauseResume() 에 store.isTtsPlaying 상태 동기화
+ *   - TTSSystem: loadVoices() — speechSynthesis.getVoices() 동적 로드,
+ *     한국어(ko-KR) 우선 정렬, store.ttsVoice URI 연동
+ *   - TTSSystem: initVoiceSelector() — tts-voice-select DOM 셀렉트 박스 구성
+ *   - LibraryFullTextSearch._renderResults: split(re) 루프의 stateful RegExp
+ *     lastIndex 버그 수정 — reSplit(split용 gi) + reTest(test용 i, g 없음) 완전 분리
+ *   - VirtualSearchList._renderChunk: 동일 RegExp 패턴 적용
  *
  * ※ 순환 의존성 차단:
  *   uploader.js와 viewer.js는 직접 상호 import 금지.
@@ -81,14 +84,7 @@ function renderTocSidebar(tocData) {
 /*
  * [버그 수정] updateTocActiveItem
  * ──────────────────────────────────────────────────────────────
- * 기존 코드: active 클래스 토글만 수행. 현재 챕터가 목차 리스트
- * 어느 위치에 있는지와 관계없이 스크롤이 이동하지 않았음.
- *
- * 수정 내용:
- *   1. active 아이템을 추적하여 activeEl 변수에 보존.
- *   2. rAF 내에서 container.scrollTop = activeEl.offsetTop 으로
- *      현재 챕터를 목차 스크롤 뷰의 최상단에 정렬.
- *   3. scrollIntoView() 미사용 — 전체 페이지 스크롤 부작용 차단.
+ * active 아이템 scrollTop 보정 추가 (scrollIntoView 미사용)
  * ──────────────────────────────────────────────────────────────
  */
 function updateTocActiveItem(href) {
@@ -102,25 +98,12 @@ function updateTocActiveItem(href) {
       href.includes(ih.split('#')[0]) || ih.includes(href.split('#')[0])
     ));
     item.classList.toggle('active', isActive);
-    /* 첫 번째 매칭 아이템만 저장 */
     if (isActive && !activeEl) activeEl = item;
   });
 
-  /*
-   * 목차가 열려 있든 닫혀 있든 scrollTop 을 미리 보정해두어
-   * 다음에 목차를 열었을 때 즉시 올바른 위치가 보이도록 한다.
-   * rAF 1프레임 후 실행 → DOM 렌더 완료 보장.
-   */
   if (activeEl) {
     requestAnimationFrame(() => {
-      try {
-        /*
-         * offsetTop: activeEl 의 offsetParent(= toc-list 스크롤 컨테이너)
-         * 기준 상단 좌표. 이를 scrollTop 에 직접 대입하면 해당 아이템이
-         * 컨테이너 뷰의 정확히 최상단(top)에 위치한다.
-         */
-        container.scrollTop = activeEl.offsetTop;
-      } catch (_) {}
+      try { container.scrollTop = activeEl.offsetTop; } catch (_) {}
     });
   }
 }
@@ -152,20 +135,25 @@ const VirtualSearchList = (() => {
       node.querySelector('.sri-section').textContent = `${i + 1}. ${(m.sectionHref || '').split('/').pop()}`;
       const snip = node.querySelector('.sri-snippet');
       snip.innerHTML = '';
-      const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-      m.context.split(re).forEach(part => {
-        if (re.test(part)) {
+      /* [v4.2 버그 수정] split(re) 루프의 stateful RegExp lastIndex 버그 수정
+         reHighlight(test용 gi) + reSplit(split용 gi) 분리 후
+         test() 호출 직후 lastIndex = 0 리셋으로 교번 매칭 오류 제거 */
+      const reHighlight = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      const reSplit     = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+      m.context.split(reSplit).forEach(part => {
+        if (reHighlight.test(part)) {
           const mk = document.createElement('mark');
           mk.className = 'fable-search-mark';
           mk.textContent = part;
           snip.appendChild(mk);
-          re.lastIndex = 0;
+          reHighlight.lastIndex = 0;
         } else {
           snip.appendChild(document.createTextNode(part));
         }
       });
       node.onclick = async () => {
         DOMProxy.get('search-modal').style.display = 'none';
+        store.isSearching = false;
         if (store.rendition && m.cfi) {
           try { await store.rendition.display(m.cfi); setTimeout(() => injectSearchHighlight(m.cfi), 400); } catch (_) {}
         }
@@ -373,6 +361,8 @@ const SearchEngine = (() => {
 async function runSearchExecution() {
   const q = DOMProxy.get('input-search-query').value?.trim() ?? '';
   if (q.length < 2) { Toast.show('검색어는 2글자 이상 입력하세요.', 'error'); return; }
+  /* [v4.2] 검색 실행 시 isSearching 활성 */
+  store.isSearching = true;
   const results = await SearchEngine.query(q);
   VirtualSearchList.render(DOMProxy.get('search-results-container'), results, q);
 }
@@ -740,10 +730,82 @@ const PageTransitionEngine = (() => {
 
 /* ══════════════════════════════════════════════════════════
    §24-X. TTS 시스템
+   ─────────────────────────────────────────────────────────
+   [v4.2 고도화]
+   · stop()       : speechSynthesis.cancel() + store.isTtsPlaying = false
+                    + tts-player-bar 숨김 + progress 초기화
+   · play()       : 재생 시작 시 store.isTtsPlaying = true,
+                    onend / onerror 에서 false 로 복원
+                    선택된 목소리(store.ttsVoice) 적용
+   · pauseResume(): 일시정지/재개 시 store.isTtsPlaying 동기화
+   · loadVoices() : speechSynthesis.getVoices() 비동기 로드
+                    ko-KR 우선 정렬, store.ttsVoice 초기값 설정
+   · initVoiceSelector(): tts-voice-select DOM 셀렉트 박스 구성
    ══════════════════════════════════════════════════════════ */
 const TTSSystem = (() => {
   let utterance = null, isPaused = false, totalLen = 0;
+  /* [v4.2] 로드된 목소리 배열 보존 — 한국어 우선, 이후 기타 다국어 정렬 */
+  let _voices = [];
 
+  /* ── 목소리 로드 ── */
+  function loadVoices() {
+    const raw = window.speechSynthesis?.getVoices?.() || [];
+    if (raw.length === 0) return;
+
+    const seen = new Set();
+    _voices = raw.filter(v => {
+      if (seen.has(v.voiceURI)) return false;
+      seen.add(v.voiceURI);
+      return true;
+    }).sort((a, b) => {
+      const aKo = a.lang.startsWith('ko') ? 0 : 1;
+      const bKo = b.lang.startsWith('ko') ? 0 : 1;
+      if (aKo !== bKo) return aKo - bKo;
+      return a.lang.localeCompare(b.lang);
+    });
+
+    if (!store.ttsVoice) {
+      const koVoice = _voices.find(v => v.lang.startsWith('ko'));
+      store.ttsVoice = koVoice ? koVoice.voiceURI : (_voices[0]?.voiceURI || '');
+    }
+  }
+
+  /* voiceschanged 이벤트 구독 — 비동기 로드 완료 시 재적재 */
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    window.speechSynthesis.addEventListener('voiceschanged', () => {
+      loadVoices();
+      _rebuildVoiceOptions();
+    });
+    loadVoices();
+  }
+
+  /* ── 셀렉트 박스 옵션 재구성 (내부 헬퍼) ── */
+  function _rebuildVoiceOptions() {
+    const sel = DOMProxy.get('tts-voice-select');
+    if (!sel || sel === DOMProxy.VOID_NODE) return;
+    sel.innerHTML = '';
+    _voices.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value       = v.voiceURI;
+      opt.textContent = `${v.name} (${v.lang})`;
+      sel.appendChild(opt);
+    });
+    sel.value = store.ttsVoice || '';
+  }
+
+  /* ── 셀렉트 박스 초기화 (main.js 에서 호출) ── */
+  function initVoiceSelector() {
+    loadVoices();
+    _rebuildVoiceOptions();
+  }
+
+  /* ── 현재 선택된 목소리 객체 반환 ── */
+  function _getSelectedVoice() {
+    if (!store.ttsVoice || _voices.length === 0) return null;
+    return _voices.find(v => v.voiceURI === store.ttsVoice) || null;
+  }
+
+  /* ── play ── */
   function play(text) {
     if (!text) return;
     window.speechSynthesis.cancel();
@@ -751,38 +813,67 @@ const TTSSystem = (() => {
     utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'ko-KR';
     utterance.rate = 1.0;
+
+    /* [v4.2] 선택된 목소리 적용 */
+    const voice = _getSelectedVoice();
+    if (voice) utterance.voice = voice;
+
     utterance.onboundary = (e) => {
-      if (e.charIndex != null)
-        DOMProxy.get('tts-progress-fill').style.width = `${Math.min(100, (e.charIndex / totalLen) * 100)}%`;
+      if (e.charIndex != null) {
+        const fill = DOMProxy.get('tts-progress-fill');
+        if (fill && fill !== DOMProxy.VOID_NODE)
+          fill.style.width = `${Math.min(100, (e.charIndex / totalLen) * 100)}%`;
+      }
     };
     utterance.onend = utterance.onerror = () => {
-      DOMProxy.get('tts-player-bar').style.display = 'none';
-      DOMProxy.get('tts-progress-fill').style.width = '0%';
+      store.isTtsPlaying = false;
+      isPaused = false;
+      const bar  = DOMProxy.get('tts-player-bar');
+      const fill = DOMProxy.get('tts-progress-fill');
+      if (bar  && bar  !== DOMProxy.VOID_NODE) bar.style.display  = 'none';
+      if (fill && fill !== DOMProxy.VOID_NODE) fill.style.width   = '0%';
     };
     isPaused = false;
     window.speechSynthesis.speak(utterance);
-    DOMProxy.get('tts-player-bar').style.display = 'flex';
+
+    /* [v4.2] 재생 시작 시 isTtsPlaying true */
+    store.isTtsPlaying = true;
+
+    const bar = DOMProxy.get('tts-player-bar');
+    if (bar && bar !== DOMProxy.VOID_NODE) bar.style.display = 'flex';
     setTextSafe(DOMProxy.get('btn-tts-play-pause'), '⏸');
   }
 
+  /* ── pauseResume ── */
   function pauseResume() {
+    if (!window.speechSynthesis.speaking && !isPaused) return;
     if (isPaused) {
       window.speechSynthesis.resume();
       isPaused = false;
+      store.isTtsPlaying = true;
       setTextSafe(DOMProxy.get('btn-tts-play-pause'), '⏸');
     } else {
       window.speechSynthesis.pause();
       isPaused = true;
+      store.isTtsPlaying = false;
       setTextSafe(DOMProxy.get('btn-tts-play-pause'), '▶');
     }
   }
 
+  /* ── stop ── */
   function stop() {
     window.speechSynthesis.cancel();
-    DOMProxy.get('tts-player-bar').style.display = 'none';
+    isPaused = false;
+    utterance = null;
+    store.isTtsPlaying = false;
+    const bar  = DOMProxy.get('tts-player-bar');
+    const fill = DOMProxy.get('tts-progress-fill');
+    if (bar  && bar  !== DOMProxy.VOID_NODE) bar.style.display  = 'none';
+    if (fill && fill !== DOMProxy.VOID_NODE) fill.style.width   = '0%';
+    setTextSafe(DOMProxy.get('btn-tts-play-pause'), '▶');
   }
 
-  return { play, pauseResume, stop };
+  return { play, pauseResume, stop, loadVoices, initVoiceSelector };
 })();
 
 /* ══════════════════════════════════════════════════════════
@@ -891,6 +982,7 @@ function initContextMenu() {
     const m = DOMProxy.get('search-modal'), i = DOMProxy.get('input-search-query');
     i.value = selectedText;
     m.style.display = 'flex';
+    store.isSearching = true;
     runSearchExecution();
     hideMenu();
   });
@@ -1115,11 +1207,18 @@ const AnnotationExporter = (() => {
 const LibraryFullTextSearch = (() => {
   let _running = false;
 
-  function open()  {
+  function open() {
     DOMProxy.get('fts-modal').style.display = 'flex';
+    /* [v4.2] 전문 검색 모달 열릴 때 isSearching 활성 */
+    store.isSearching = true;
     setTimeout(() => DOMProxy.get('fts-input').focus(), 60);
   }
-  function close() { DOMProxy.get('fts-modal').style.display = 'none'; }
+
+  function close() {
+    DOMProxy.get('fts-modal').style.display = 'none';
+    /* [v4.2] 전문 검색 모달 닫힐 때 isSearching 해제 */
+    store.isSearching = false;
+  }
 
   async function run() {
     if (_running) return;
@@ -1182,14 +1281,18 @@ const LibraryFullTextSearch = (() => {
       title.textContent = `📖 ${hit.title || '제목 없음'}`;
       const snip  = document.createElement('div');
       snip.className = 'fts-result-snippet';
-      const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
       snip.innerHTML = '';
-      hit.snippet.split(re).forEach(part => {
-        if (re.test(part)) {
+      /* [v4.2 버그 수정] split(re) 루프의 stateful RegExp lastIndex 교번 매칭 버그 수정
+         reSplit(split용 gi) + reTest(test용 i, g 플래그 없음) 완전 분리
+         → reTest 는 lastIndex 변이 없으므로 루프 재진입 시 안전 */
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const reSplit = new RegExp(`(${escaped})`, 'gi');
+      const reTest  = new RegExp(escaped, 'i');
+      hit.snippet.split(reSplit).forEach(part => {
+        if (reTest.test(part)) {
           const m = document.createElement('mark');
           m.textContent = part;
           snip.appendChild(m);
-          re.lastIndex = 0;
         } else {
           snip.appendChild(document.createTextNode(part));
         }
@@ -1212,7 +1315,10 @@ const LibraryFullTextSearch = (() => {
     if (!DOMProxy.exists('fts-modal')) return;
     DOMProxy.get('btn-fts-close').addEventListener('click', close);
     DOMProxy.get('btn-fts-run').addEventListener('click', run);
-    DOMProxy.get('fts-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+    DOMProxy.get('fts-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter')  run();
+      if (e.key === 'Escape') close();
+    });
   }
 
   return { open, close, init };

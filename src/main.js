@@ -1,5 +1,5 @@
 /**
- * src/main.js  ── Fable Premium v4.1
+ * src/main.js  ── Fable Premium v5.0
  * ───────────────────────────────────────────────────────────────────
  * 시스템 부트스트랩 + 오케스트레이션 (모듈 진입점)
  *
@@ -26,7 +26,18 @@
  *   - AutoScrollDriver.toggle(null) → 실제 view 객체 전달
  *   - 검색/통계 모달 외부 클릭 닫기 추가
  *   - registerReaderDeps 호출 시 initAnnotationManager 래퍼 제거
- *     (viewer.js export 제거에 따른 import 목록 동기화)
+ *
+ * [고도화 v4.2]
+ *   - handleKeyDown: store.isSearching / fts-modal 활성 시 Space·방향키 가드
+ *   - TTS 정지 버튼(btn-tts-stop) 바인딩 — TTSSystem.stop() 연결
+ *   - slider-scrubber TTS 재생 중 조작 차단 토스트 이벤트 주입
+ *
+ * [고도화 v5.0]
+ *   - store.fxAnimation / fxBlur / fxZenMode 리액티브 바인더 추가
+ *   - initZenMode(): 2초 비활동 → zen-mode-active 클래스 오케스트레이션
+ *     (뷰어 화면에서만 활성, store.fxZenMode=false 시 완전 비활성)
+ *   - _forceSyncSettingsUI(): FX 체크박스 동기화 확장
+ *   - applyFxState import 및 부팅 시 즉시 적용
  * ───────────────────────────────────────────────────────────────────
  */
 
@@ -51,19 +62,20 @@ import {
 } from './reader.js';
 import {
   HashWorker, refreshLibraryData, renderLibraryGrid, importEpubFiles,
-} from './ui/uploader.js';
+} from './uploader.js';
 import {
   renderTocSidebar, updateTocActiveItem,
   ReadingStatsTracker, SearchEngine, VirtualSearchList, runSearchExecution,
   AnnotationManager, initContextMenu, TTSSystem, bindScrollTopButton,
   MetadataEditor, AnnotationExporter, LibraryFullTextSearch, CloudBackup, Pomodoro,
   ReadingReport, OnboardingGuide,
-} from './ui/viewer.js';
+} from './viewer.js';
 import {
   initFontUploader, initFontSelector, initCustomThemeBuilder,
   initV4SettingsUI,
   showKeyboardHint, initOfflineBanner, _saveStateToLS, _loadStateFromLS,
-} from './ui/settings.js';
+  applyFxState,
+} from './settings.js';
 
 /* ══════════════════════════════════════════════════════════════════
    환경 변수 Null-Safe 접근
@@ -79,24 +91,42 @@ function _envMode() {
 /* ══════════════════════════════════════════════════════════════════
    §32. 키보드 단축키
    ─────────────────────────────────────────────────────────────────
-   ※ registerReaderDeps() 호출보다 앞에 함수 선언식(function declaration)
-     으로 정의해야 한다. JS 엔진은 함수 선언식을 호이스팅하므로
-     registerReaderDeps({ handleKeyDown }) 참조 시점에 이미 확정된다.
+   [v4.2 가드] 전문 검색 활성 상태 또는 검색 모달 내 인풋 포커스 중에는
+   Space·방향키 이벤트를 preventDefault 없이 즉시 return 한다.
    ══════════════════════════════════════════════════════════════════ */
 function handleKeyDown(e) {
   const viewer = DOMProxy.get('screen-viewer');
   if (!DOMProxy.exists('screen-viewer') || viewer.style.display === 'none') return;
   if (!store.rendition) return;
+
+  const _isSearchActive = () => {
+    if (store.isSearching) return true;
+    const searchModal = DOMProxy.get('search-modal');
+    if (searchModal && searchModal.style.display === 'flex') return true;
+    const ftsModal = DOMProxy.get('fts-modal');
+    if (ftsModal && ftsModal.style.display === 'flex') return true;
+    return false;
+  };
+
   switch (e.key) {
     case 'ArrowRight': case 'ArrowDown': case ' ':
+      if (_isSearchActive()) return;
       e.preventDefault(); NavGuard.next(); break;
     case 'ArrowLeft': case 'ArrowUp': case 'Backspace':
+      if (_isSearchActive()) return;
       e.preventDefault(); NavGuard.prev(); break;
     case 'Escape':
       if (store.isSettingsOpen) { store.isSettingsOpen = false; break; }
       if (store.isTocOpen)      { store.isTocOpen      = false; break; }
       if (DOMProxy.get('search-modal')?.style.display === 'flex') {
-        DOMProxy.get('search-modal').style.display = 'none'; break;
+        DOMProxy.get('search-modal').style.display = 'none';
+        store.isSearching = false;
+        break;
+      }
+      if (DOMProxy.get('fts-modal')?.style.display === 'flex') {
+        DOMProxy.get('fts-modal').style.display = 'none';
+        store.isSearching = false;
+        break;
       }
       if (DOMProxy.get('stats-modal')?.style.display === 'flex') {
         DOMProxy.get('stats-modal').style.display = 'none'; break;
@@ -109,10 +139,6 @@ function handleKeyDown(e) {
 
 /* ══════════════════════════════════════════════════════════════════
    순환 의존성 차단 — reader.js에 UI 콜백 주입
-   ─────────────────────────────────────────────────────────────────
-   handleKeyDown은 위에서 함수 선언식으로 정의되어 호이스팅 완료.
-   AnnotationManager는 viewer.js에서 export된 객체를 직접 주입.
-   (initAnnotationManager 래퍼는 viewer.js v4.1에서 제거됨)
    ══════════════════════════════════════════════════════════════════ */
 registerReaderDeps({
   renderTocSidebar,
@@ -126,6 +152,105 @@ registerReaderDeps({
   handleKeyDown,
   bindScrollTopButton,
 });
+
+/* ══════════════════════════════════════════════════════════════════
+   [v5.0] §ZEN. 젠 모드 오케스트레이션
+   ─────────────────────────────────────────────────────────────────
+   뷰어 화면이 활성 상태이고 store.fxZenMode === true 일 때,
+   2초(CSS --fx-zen-idle-delay와 동기) 동안 포인터/터치 입력이
+   없으면 body에 zen-mode-active 클래스를 추가하여 상하단 바를
+   CSS transition으로 페이드아웃 한다.
+   포인터 이동/터치 발생 시 클래스를 즉시 제거한다.
+   ══════════════════════════════════════════════════════════════════ */
+function initZenMode() {
+  /* 내부 상태 */
+  let _zenTimer       = null;
+  let _zenActive      = false;
+  const ZEN_DELAY_MS  = 2000;   /* CSS --fx-zen-idle-delay와 동기화 */
+
+  /* 젠 모드 진입 */
+  function _enterZen() {
+    if (_zenActive) return;
+    _zenActive = true;
+    document.body.classList.add('zen-mode-active');
+    const viewer = DOMProxy.get('screen-viewer');
+    if (viewer && viewer !== DOMProxy.VOID_NODE) viewer.classList.add('zen-mode-active');
+  }
+
+  /* 젠 모드 해제 — 즉각적 */
+  function _exitZen() {
+    _zenActive = false;
+    document.body.classList.remove('zen-mode-active');
+    const viewer = DOMProxy.get('screen-viewer');
+    if (viewer && viewer !== DOMProxy.VOID_NODE) viewer.classList.remove('zen-mode-active');
+  }
+
+  /* 타이머 리셋 + 젠 해제 */
+  function _resetZenTimer() {
+    /* fxZenMode가 꺼져 있으면 아무것도 안 함 */
+    if (store.fxZenMode === false) { _exitZen(); return; }
+    /* 뷰어 화면이 아니면 작동 안 함 */
+    if (!store.isViewerOpen) { _exitZen(); return; }
+
+    _exitZen();
+    clearTimeout(_zenTimer);
+    _zenTimer = setTimeout(_enterZen, ZEN_DELAY_MS);
+  }
+
+  /* 활동 감지 이벤트 — 뷰어 iframe 내부 포함 */
+  const _ACTIVITY_EVENTS = ['pointermove', 'pointerdown', 'keydown', 'touchstart', 'wheel'];
+
+  _ACTIVITY_EVENTS.forEach(type => {
+    document.addEventListener(type, _resetZenTimer, { passive: true, capture: true });
+  });
+
+  /* iframe 내부 활동도 감지 — epub.js iframe에 이벤트 전달 위임 */
+  function _hookIframeActivity() {
+    const iframes = document.querySelectorAll('#viewer-viewport iframe, .epub-container iframe');
+    iframes.forEach(iframe => {
+      try {
+        const iframeDoc = iframe.contentDocument;
+        if (!iframeDoc) return;
+        _ACTIVITY_EVENTS.forEach(type => {
+          iframeDoc.addEventListener(type, _resetZenTimer, { passive: true, capture: true });
+        });
+      } catch (_) {}
+    });
+  }
+
+  /* rendition 준비 완료 후 iframe 훅 — store.rendition 변화 감지 */
+  ReactiveStore.subscribe('rendition', (rendition) => {
+    if (rendition) {
+      /* rendition.on('rendered') 이후 iframe이 완전히 삽입되므로 딜레이 */
+      setTimeout(_hookIframeActivity, 600);
+      rendition.on('rendered', () => {
+        setTimeout(_hookIframeActivity, 300);
+      });
+    }
+  });
+
+  /* 뷰어 진입/이탈 시 타이머 제어 */
+  ReactiveStore.subscribe('isViewerOpen', (open) => {
+    if (open) {
+      /* 뷰어 진입 — 젠 타이머 시작 */
+      _resetZenTimer();
+    } else {
+      /* 서재로 복귀 — 젠 해제 + 타이머 정리 */
+      clearTimeout(_zenTimer);
+      _exitZen();
+    }
+  });
+
+  /* fxZenMode 토글 시 즉시 반영 */
+  ReactiveStore.subscribe('fxZenMode', (enabled) => {
+    if (!enabled) {
+      clearTimeout(_zenTimer);
+      _exitZen();
+    } else if (store.isViewerOpen) {
+      _resetZenTimer();
+    }
+  });
+}
 
 /* ══════════════════════════════════════════════════════════════════
    §13. Reactive UI Binders
@@ -236,8 +361,6 @@ function mountReactiveBinders() {
   ReactiveStore.subscribe('sortMode',       () => renderLibraryGrid());
   ReactiveStore.subscribe('librarySearch',  () => renderLibraryGrid());
 
-  /* [v4.0] 신규 Reactive 바인더 */
-
   ReactiveStore.subscribe('measuredWpm', (wpm) => {
     if (DOMProxy.exists('stat-wpm'))
       setTextSafe(DOMProxy.get('stat-wpm'), `${wpm} WPM`);
@@ -279,6 +402,25 @@ function mountReactiveBinders() {
       DOMProxy.get('btn-eye-protect').setAttribute('aria-pressed', String(active));
     }
   });
+
+  ReactiveStore.subscribe('isTtsPlaying', (playing) => {
+    if (DOMProxy.exists('btn-tts-play-pause')) {
+      setTextSafe(DOMProxy.get('btn-tts-play-pause'), playing ? '⏸' : '▶');
+      DOMProxy.get('btn-tts-play-pause').setAttribute('aria-pressed', String(playing));
+    }
+  });
+
+  ReactiveStore.subscribe('ttsVoice', (voiceURI) => {
+    const sel = DOMProxy.get('tts-voice-select');
+    if (sel && sel !== DOMProxy.VOID_NODE) sel.value = voiceURI || '';
+  });
+
+  /* ── [v5.0] FX 상태 리액티브 바인더 ──
+     store.fxAnimation / fxBlur / fxZenMode 변화 시
+     html 어트리뷰트를 즉시 갱신하여 CSS 가드를 활성화/해제한다. */
+  ReactiveStore.subscribe('fxAnimation', () => applyFxState());
+  ReactiveStore.subscribe('fxBlur',      () => applyFxState());
+  ReactiveStore.subscribe('fxZenMode',   () => applyFxState());
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -296,7 +438,6 @@ function _seekToPercent(pct)    { return seekToPercent(pct); }
 
 /* ══════════════════════════════════════════════════════════════════
    §36. 버튼 이벤트 전체 바인딩
-   [버그 수정 v4.1] 누락 바인딩 전면 추가 + ID 오탈자 수정
    ══════════════════════════════════════════════════════════════════ */
 function initButtonEventHandlers() {
   const fileInput = DOMProxy.get('file-input');
@@ -356,188 +497,113 @@ function initButtonEventHandlers() {
     });
   }
 
-  /* 목차 열기/닫기 버튼 */
-  if (DOMProxy.exists('btn-toc-toggle')) {
-    DOMProxy.get('btn-toc-toggle').addEventListener('click', () => {
-      store.isTocOpen = !store.isTocOpen;
-    });
-  }
-
-  /* [버그 수정] 목차 사이드바 X 닫기 버튼 — 누락된 바인딩 추가 */
-  if (DOMProxy.exists('btn-toc-close')) {
-    DOMProxy.get('btn-toc-close').addEventListener('click', () => {
-      store.isTocOpen = false;
-    });
-  }
-
-  /* 목차 오버레이 클릭 닫기 */
-  if (DOMProxy.exists('toc-overlay')) {
-    DOMProxy.get('toc-overlay').addEventListener('click', () => { store.isTocOpen = false; });
-  }
-
-  /* [버그 수정] 뷰어 닫기 — HTML ID는 btn-close-viewer, btn-exit-viewer 양쪽 대응 */
+  /* ── 뷰어 닫기 버튼 ── */
   if (DOMProxy.exists('btn-close-viewer')) {
     DOMProxy.get('btn-close-viewer').addEventListener('click', () => {
       if (confirm('뷰어를 닫고 서재로 돌아가시겠습니까?')) exitViewer();
     });
   }
-  if (DOMProxy.exists('btn-exit-viewer')) {
-    DOMProxy.get('btn-exit-viewer').addEventListener('click', () => {
-      if (confirm('뷰어를 닫고 서재로 돌아가시겠습니까?')) exitViewer();
+
+  /* ── 목차 토글 ── */
+  if (DOMProxy.exists('btn-toc-toggle')) {
+    DOMProxy.get('btn-toc-toggle').addEventListener('click', () => {
+      store.isTocOpen = !store.isTocOpen;
+    });
+  }
+  if (DOMProxy.exists('btn-toc-close')) {
+    DOMProxy.get('btn-toc-close').addEventListener('click', () => {
+      store.isTocOpen = false;
+    });
+  }
+  if (DOMProxy.exists('toc-overlay')) {
+    DOMProxy.get('toc-overlay').addEventListener('click', () => {
+      store.isTocOpen = false;
     });
   }
 
-  /* 이전/다음 페이지 화살표 */
-  if (DOMProxy.exists('arrow-prev'))
-    DOMProxy.get('arrow-prev').addEventListener('click', () => NavGuard.prev());
-  if (DOMProxy.exists('arrow-next'))
-    DOMProxy.get('arrow-next').addEventListener('click', () => NavGuard.next());
+  /* ── 페이지 이동 ── */
+  if (DOMProxy.exists('btn-prev-page'))
+    DOMProxy.get('btn-prev-page').addEventListener('click', () => NavGuard.prev());
+  if (DOMProxy.exists('btn-next-page'))
+    DOMProxy.get('btn-next-page').addEventListener('click', () => NavGuard.next());
 
-  /* ── [버그 수정] 검색 모달 (🔍) — 누락 바인딩 추가 ── */
-  if (DOMProxy.exists('btn-search-toggle')) {
-    DOMProxy.get('btn-search-toggle').addEventListener('click', () => {
-      const modal = DOMProxy.get('search-modal');
-      if (!modal) return;
-      const nowOpen = modal.style.display === 'flex';
-      modal.style.display = nowOpen ? 'none' : 'flex';
-      if (!nowOpen)
-        setTimeout(() => { if (DOMProxy.exists('input-search-query')) DOMProxy.get('input-search-query').focus(); }, 60);
+  /* ── 폰트 크기 ── */
+  if (DOMProxy.exists('btn-font-decrease')) {
+    DOMProxy.get('btn-font-decrease').addEventListener('click', () => {
+      store.fontSize = Math.max(60, store.fontSize - 5); _saveStateToLS();
     });
   }
-  if (DOMProxy.exists('btn-search-modal-close')) {
-    DOMProxy.get('btn-search-modal-close').addEventListener('click', () => {
-      DOMProxy.get('search-modal').style.display = 'none';
+  if (DOMProxy.exists('btn-font-increase')) {
+    DOMProxy.get('btn-font-increase').addEventListener('click', () => {
+      store.fontSize = Math.min(200, store.fontSize + 5); _saveStateToLS();
     });
   }
-
-  /* 검색 실행 버튼 — btn-execute-search(HTML 실제 ID) + btn-search-exec(구버전) 양쪽 대응 */
-  if (DOMProxy.exists('btn-execute-search'))
-    DOMProxy.get('btn-execute-search').addEventListener('click', () => runSearchExecution());
-  if (DOMProxy.exists('btn-search-exec'))
-    DOMProxy.get('btn-search-exec').addEventListener('click', () => runSearchExecution());
-
-  /* 검색 입력창 엔터/Esc */
-  if (DOMProxy.exists('input-search-query')) {
-    DOMProxy.get('input-search-query').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter')  runSearchExecution();
-      if (e.key === 'Escape') DOMProxy.get('search-modal').style.display = 'none';
-    });
-  }
-
-  /* 레거시 인라인 검색 패널 (있으면 바인딩) */
-  if (DOMProxy.exists('btn-search-open')) {
-    DOMProxy.get('btn-search-open').addEventListener('click', () => {
-      const panel = DOMProxy.get('search-panel');
-      if (panel) panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
-    });
-  }
-
-  /* ── [버그 수정] 메모/하이라이트·TTS (✏️) — 누락 바인딩 추가 ──
-     선택 텍스트가 있으면 낭독, 없으면 현재 페이지 본문 TTS 폴백     */
-  if (DOMProxy.exists('btn-annotation-toggle')) {
-    DOMProxy.get('btn-annotation-toggle').addEventListener('click', () => {
-      let text = '';
-      try {
-        const vp = DOMProxy.get('viewer-viewport');
-        if (vp) {
-          vp.querySelectorAll('iframe').forEach(f => {
-            const s = f.contentWindow?.getSelection()?.toString()?.trim();
-            if (s) text = s;
-          });
-        }
-        if (!text && store.rendition) {
-          const contents = store.rendition.getContents?.() || [];
-          const arr = Array.isArray(contents) ? contents : [contents];
-          arr.forEach(c => {
-            if (!text && c?.document?.body)
-              text = c.document.body.textContent?.trim()?.slice(0, 3000) || '';
-          });
-        }
-      } catch (_) {}
-      if (text) TTSSystem.play(text);
-      else Toast.show('낭독할 텍스트를 먼저 선택하거나 책을 열어주세요.', 'info');
-    });
-  }
-
-  /* ── [버그 수정] 통계 모달 (📊) — 누락 바인딩 추가 ── */
-  if (DOMProxy.exists('btn-stats-toggle')) {
-    DOMProxy.get('btn-stats-toggle').addEventListener('click', async () => {
-      const modal = DOMProxy.get('stats-modal');
-      if (!modal) return;
-      const nowOpen = modal.style.display === 'flex';
-      if (nowOpen) {
-        modal.style.display = 'none';
-      } else {
-        modal.style.display = 'flex';
-        /* 독서 리포트 위젯 최신화 */
-        try {
-          const log = await StorageSystem.getReadingLog();
-          ReadingReport.render(log, 'reading-report-widget');
-        } catch (_) {}
-      }
-    });
-  }
-  if (DOMProxy.exists('btn-stats-modal-close')) {
-    DOMProxy.get('btn-stats-modal-close').addEventListener('click', () => {
-      DOMProxy.get('stats-modal').style.display = 'none';
-    });
-  }
-
-  /* 독서 목표 저장 */
-  if (DOMProxy.exists('btn-save-goal')) {
-    DOMProxy.get('btn-save-goal').addEventListener('click', () => {
-      const val = parseInt(DOMProxy.get('input-reading-goal')?.value || '30', 10);
-      if (val > 0) {
-        localStorage.setItem('fable_daily_goal', String(val));
-        store.dailyGoalMin = val;
-        Toast.show(`일일 독서 목표가 ${val}분으로 설정되었습니다.`, 'success');
-      }
-    });
-  }
-
-  /* ── TTS 컨트롤 ── */
-  if (DOMProxy.exists('btn-tts-play-pause'))
-    DOMProxy.get('btn-tts-play-pause').addEventListener('click', () => TTSSystem.pauseResume());
-  if (DOMProxy.exists('btn-tts-stop'))
-    DOMProxy.get('btn-tts-stop').addEventListener('click', () => TTSSystem.stop());
-  /* 레거시 단일 토글 버튼 폴백 */
-  if (DOMProxy.exists('btn-tts-toggle'))
-    DOMProxy.get('btn-tts-toggle').addEventListener('click', () => TTSSystem.pauseResume());
-
-  /* ── [버그 수정] 포모도로 (🍅) — btn-pomodoro-open 누락 추가 ── */
-  if (DOMProxy.exists('btn-pomodoro-open'))
-    DOMProxy.get('btn-pomodoro-open').addEventListener('click', () => Pomodoro.openPopup());
-
-  /* ── flow 전환 버튼 ── */
-  DOMProxy.qa('[data-flow]').forEach(b => {
-    b.addEventListener('click', () => { switchFlowMode(b.dataset.flow); _saveStateToLS(); });
-  });
 
   /* ── 테마 스와치 ── */
   DOMProxy.qa('.theme-swatch').forEach(b => {
     b.addEventListener('click', () => { store.theme = b.dataset.theme; _saveStateToLS(); });
   });
 
-  /* ── [버그 수정] 폰트 크기 — HTML ID는 btn-font-decrease/increase,
-     구버전 btn-font-minus/plus 도 함께 대응                           ── */
-  if (DOMProxy.exists('btn-font-decrease'))
-    DOMProxy.get('btn-font-decrease').addEventListener('click', () => {
-      store.fontSize = Math.max(60, store.fontSize - 5); _saveStateToLS();
-    });
-  if (DOMProxy.exists('btn-font-minus'))
-    DOMProxy.get('btn-font-minus').addEventListener('click', () => {
-      store.fontSize = Math.max(60, store.fontSize - 5); _saveStateToLS();
-    });
-  if (DOMProxy.exists('btn-font-increase'))
-    DOMProxy.get('btn-font-increase').addEventListener('click', () => {
-      store.fontSize = Math.min(200, store.fontSize + 5); _saveStateToLS();
-    });
-  if (DOMProxy.exists('btn-font-plus'))
-    DOMProxy.get('btn-font-plus').addEventListener('click', () => {
-      store.fontSize = Math.min(200, store.fontSize + 5); _saveStateToLS();
-    });
+  /* ── 흐름 전환 (paginated / scrolled) ── */
+  DOMProxy.qa('[data-flow]').forEach(b => {
+    b.addEventListener('click', () => { store.flow = b.dataset.flow; switchFlowMode(b.dataset.flow); _saveStateToLS(); });
+  });
 
-  /* ── 행간 버튼 ── */
+  /* ── 검색 모달 토글 ── */
+  if (DOMProxy.exists('btn-search-toggle')) {
+    DOMProxy.get('btn-search-toggle').addEventListener('click', () => {
+      const modal = DOMProxy.get('search-modal');
+      if (!modal || modal === DOMProxy.VOID_NODE) return;
+      const isVisible = modal.style.display === 'flex';
+      modal.style.display = isVisible ? 'none' : 'flex';
+      store.isSearching = !isVisible;
+      if (!isVisible) {
+        const input = modal.querySelector('input[type="text"], input[type="search"]');
+        if (input) setTimeout(() => input.focus(), 80);
+      }
+    });
+  }
+
+  /* ── 주석/어노테이션 토글 ── */
+  if (DOMProxy.exists('btn-annotation-toggle')) {
+    DOMProxy.get('btn-annotation-toggle').addEventListener('click', () => {
+      TTSSystem.pauseResume();
+    });
+  }
+
+  /* ── 통계 모달 토글 ── */
+  if (DOMProxy.exists('btn-stats-toggle')) {
+    DOMProxy.get('btn-stats-toggle').addEventListener('click', () => {
+      const modal = DOMProxy.get('stats-modal');
+      if (!modal || modal === DOMProxy.VOID_NODE) return;
+      const isVisible = modal.style.display === 'flex';
+      modal.style.display = isVisible ? 'none' : 'flex';
+      if (!isVisible) ReadingReport.render();
+    });
+  }
+
+  /* ── 포모도로 버튼 ── */
+  if (DOMProxy.exists('btn-pomodoro-open')) {
+    DOMProxy.get('btn-pomodoro-open').addEventListener('click', () => {
+      Pomodoro.openPopup();
+    });
+  }
+
+  /* ── TTS 재생/일시정지 ── */
+  if (DOMProxy.exists('btn-tts-play-pause')) {
+    DOMProxy.get('btn-tts-play-pause').addEventListener('click', () => {
+      TTSSystem.pauseResume();
+    });
+  }
+
+  /* ── [v4.2] TTS 정지 버튼 ── */
+  if (DOMProxy.exists('btn-tts-stop')) {
+    DOMProxy.get('btn-tts-stop').addEventListener('click', () => {
+      TTSSystem.stop();
+    });
+  }
+
+  /* ── 행간 버튼 그룹 ── */
   DOMProxy.qa('[data-lh]').forEach(b => {
     b.addEventListener('click', () => { store.lineHeight = b.dataset.lh; _saveStateToLS(); });
   });
@@ -546,10 +612,9 @@ function initButtonEventHandlers() {
   if (DOMProxy.exists('btn-eye-protect'))
     DOMProxy.get('btn-eye-protect').addEventListener('click', () => EyeProtectTimer.toggle());
 
-  /* ── [v4.0] 자동 스크롤 — 실제 view 객체를 안전하게 추출해 전달 ── */
+  /* ── [v4.0] 자동 스크롤 ── */
   if (DOMProxy.exists('btn-auto-scroll')) {
     DOMProxy.get('btn-auto-scroll').addEventListener('click', () => {
-      /* rendition.manager.views() 는 현재 렌더된 view 배열을 반환 */
       let view = null;
       try { view = store.rendition?.manager?.views?.()?.[0] ?? null; } catch (_) {}
       AutoScrollDriver.toggle(view);
@@ -574,14 +639,14 @@ function initButtonEventHandlers() {
     });
   }
 
-  /* ── [버그 수정] 스크러버 HUD — HTML ID 'slider-tooltip' 으로 수정
-     (기존 코드는 존재하지 않는 'scrubber-tooltip' 을 참조해
-      DOMProxy.exists 가드에서 즉시 반환 → 슬라이더 전체 비활성화)  ── */
+  /* ── 스크러버 HUD ── */
   _initScrubberHoverHUD();
+
+  /* ── [v4.2] 슬라이더 TTS 재생 중 조작 차단 블로커 ── */
+  _initScrubberTtsBlocker();
 
   /* ── 설정 패널 외부 클릭 닫기 ── */
   document.addEventListener('pointerdown', (e) => {
-    /* 설정 패널 */
     const panel = DOMProxy.get('settings-panel');
     const btnV  = DOMProxy.get('btn-settings-toggle');
     const btnL  = DOMProxy.get('btn-library-settings');
@@ -591,14 +656,14 @@ function initButtonEventHandlers() {
         !btnL.contains?.(e.target)) {
       store.isSettingsOpen = false;
     }
-    /* 검색 모달 외부 클릭 닫기 */
     const searchModal = DOMProxy.get('search-modal');
     if (searchModal && searchModal.style.display === 'flex') {
       const btnSearch = DOMProxy.get('btn-search-toggle');
-      if (!searchModal.contains?.(e.target) && !btnSearch?.contains?.(e.target))
+      if (!searchModal.contains?.(e.target) && !btnSearch?.contains?.(e.target)) {
         searchModal.style.display = 'none';
+        store.isSearching = false;
+      }
     }
-    /* 통계 모달 외부 클릭 닫기 */
     const statsModal = DOMProxy.get('stats-modal');
     if (statsModal && statsModal.style.display === 'flex') {
       const btnStats = DOMProxy.get('btn-stats-toggle');
@@ -618,15 +683,9 @@ function initButtonEventHandlers() {
 
 /* ══════════════════════════════════════════════════════════════════
    [v4.0] §36-A. 스크러버 호버 미리보기 HUD
-   [버그 수정] tooltip ID: 'scrubber-tooltip' → 'slider-tooltip'
    ══════════════════════════════════════════════════════════════════ */
 function _initScrubberHoverHUD() {
   const slider  = DOMProxy.get('progress-range-slider');
-  /*
-   * [버그 수정] HTML 실제 ID 는 'slider-tooltip'.
-   * 기존 'scrubber-tooltip' 은 존재하지 않아 DOMProxy.exists() 가드에서
-   * 즉시 return → 슬라이더 hover/drag 이벤트 전체가 바인딩되지 않았음.
-   */
   const tooltip = DOMProxy.get('slider-tooltip');
   if (!DOMProxy.exists('progress-range-slider')) return;
 
@@ -643,7 +702,6 @@ function _initScrubberHoverHUD() {
       tooltip.style.display   = 'block';
       tooltip.style.left      = `${leftPx}px`;
       tooltip.style.transform = 'translateX(-50%)';
-      /* 자식 요소가 있으면 개별 업데이트 */
       const chEl  = tooltip.querySelector('#slider-tooltip-chapter, .slider-tooltip-chapter');
       const pctEl = tooltip.querySelector('#slider-tooltip-pct,     .slider-tooltip-pct');
       if (chEl && pctEl) {
@@ -653,7 +711,6 @@ function _initScrubberHoverHUD() {
         tooltip.textContent = chapter ? `${chapter} · ${pageEst}p` : `${pageEst}p`;
       }
     }
-
     store.scrubberHoverPct = pct;
   }
 
@@ -699,7 +756,49 @@ function _initScrubberHoverHUD() {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §36-B. Settings UI 동기화 강제 초기화
+   [v4.2] §36-B. 슬라이더 TTS 재생 중 조작 차단 블로커
+   ══════════════════════════════════════════════════════════════════ */
+function _initScrubberTtsBlocker() {
+  const scrubber = DOMProxy.exists('slider-scrubber')
+    ? DOMProxy.get('slider-scrubber')
+    : DOMProxy.get('progress-range-slider');
+
+  if (!scrubber || scrubber === DOMProxy.VOID_NODE) return;
+
+  let _toastCooldown = false;
+
+  scrubber.addEventListener('mouseover', () => {
+    if (!store.isTtsPlaying) return;
+    if (_toastCooldown) return;
+    _toastCooldown = true;
+    Toast.show('TTS 재생 중에는 하단 스크롤바 조작이 제한됩니다.', 'warning');
+    setTimeout(() => { _toastCooldown = false; }, 2000);
+  });
+
+  scrubber.addEventListener('pointerdown', (e) => {
+    if (!store.isTtsPlaying) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!_toastCooldown) {
+      _toastCooldown = true;
+      Toast.show('TTS 재생 중에는 하단 스크롤바 조작이 제한됩니다.', 'warning');
+      setTimeout(() => { _toastCooldown = false; }, 2000);
+    }
+  });
+
+  scrubber.addEventListener('touchstart', (e) => {
+    if (!store.isTtsPlaying) return;
+    e.preventDefault();
+    if (!_toastCooldown) {
+      _toastCooldown = true;
+      Toast.show('TTS 재생 중에는 하단 스크롤바 조작이 제한됩니다.', 'warning');
+      setTimeout(() => { _toastCooldown = false; }, 2000);
+    }
+  }, { passive: false });
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §36-C. Settings UI 동기화 강제 초기화 — [v5.0] FX 체크박스 추가
    ══════════════════════════════════════════════════════════════════ */
 function _forceSyncSettingsUI() {
   setTextSafe(DOMProxy.get('font-size-display'), `${store.fontSize}%`);
@@ -750,6 +849,21 @@ function _forceSyncSettingsUI() {
     const ok = b.dataset.transition === (store.pageTransition || 'fade');
     b.classList.toggle('active', ok); b.setAttribute('aria-checked', String(ok));
   });
+
+  /* [v5.0] FX 토글 체크박스 동기화 */
+  const fxMap = {
+    'fx-toggle-animation': 'fxAnimation',
+    'fx-toggle-blur':      'fxBlur',
+    'fx-toggle-zen':       'fxZenMode',
+  };
+  Object.entries(fxMap).forEach(([elId, storeKey]) => {
+    if (DOMProxy.exists(elId)) {
+      DOMProxy.get(elId).checked = store[storeKey] !== false;
+    }
+  });
+
+  /* [v5.0] FX 어트리뷰트 즉시 적용 */
+  applyFxState();
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -772,7 +886,7 @@ function initLibraryControls() {
   store.dailyGoalMin = parseInt(localStorage.getItem('fable_daily_goal') || '30', 10);
 }
 
-/* [3]-9 미니멀 상단바 스크롤 동적 고정 (Sticky Header) */
+/* 미니멀 상단바 스크롤 동적 고정 (Sticky Header) */
 function initStickyHeader() {
   const body   = DOMProxy.get('library-body');
   const topbar = DOMProxy.get('library-topbar');
@@ -792,11 +906,6 @@ function initStickyHeader() {
    §38. 전역 진입점 — 비동기 초기화 시퀀스
    ══════════════════════════════════════════════════════════════════ */
 async function initializeSystemCore() {
-  /*
-   * [B1] 비동기 런타임 가드 레이어
-   * epub.js 로드 여부와 UI 기동을 완전 분리.
-   * 실제 책을 열 때 waitForEpubJS()로 가용성 확인.
-   */
   if (!isEpubRuntimeReady()) {
     console.info('[Fable] EPUB 엔진 백그라운드 로드 대기 중… (UI는 정상 기동)');
     waitForEpubJS(3000).then((ok) => {
@@ -825,7 +934,6 @@ async function initializeSystemCore() {
     try { StorageSystem.flushProgressNow(); } catch (_) {}
   });
 
-  /* [스마트 슬립 가드] visibilitychange → store.appInBackground */
   document.addEventListener('visibilitychange', () => {
     store.appInBackground = document.hidden;
   });
@@ -857,25 +965,26 @@ async function initializeSystemCore() {
   initOfflineBanner();
   initContextMenu();
 
-  /* 신규 모듈 초기화 */
+  /* [v5.0] 젠 모드 오케스트레이터 초기화 — initButtonEventHandlers 이후 */
+  initZenMode();
+
   MetadataEditor.init();
   AnnotationExporter.init();
   LibraryFullTextSearch.init();
   CloudBackup.init();
   Pomodoro.init();
+  TTSSystem.initVoiceSelector();
   initLibraryControls();
   initStickyHeader();
   refreshLibraryData();
 
-  /* [v4.0] 최초 진입 시 온보딩 가이드 실행
-     [버그 수정] OnboardingGuide.start() → OnboardingGuide.init() */
   if (!store.onboardingDone) {
     setTimeout(() => OnboardingGuide.init(), 600);
   }
 
   if (!('ontouchstart' in window)) showKeyboardHint();
 
-  console.log('📖 Fable Premium v4.1 — Initialized');
+  console.log('📖 Fable Premium v5.0 — Initialized');
 }
 
 /* ══════════════════════════════════════════════════════════════════

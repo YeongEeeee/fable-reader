@@ -1,0 +1,720 @@
+/**
+ * src/ui/fx.css  ── Fable Premium v5.0
+ * ─────────────────────────────────────────────────────────────────
+ * 비주얼 특수효과(FX) 전역 스타일시트
+ *
+ * 구조:
+ *   §1.  CSS 커스텀 프로퍼티 (FX 제어 토큰)
+ *   §2.  글래스모피즘 툴바 (상/하단)
+ *   §3.  젠 모드 — 자동 UI 숨김 오케스트레이션
+ *   §4.  미니멀 HUD 스크러버 (2px 기본 / 호버 확장)
+ *   §5.  플로팅 TOC / 검색 사이드바 오버레이
+ *   §6.  Drop Cap 문단 첫 글자 장식
+ *   §7.  스켈레톤 로딩 UI
+ *   §8.  하이라이터 SVG/CSS 마스킹 텍스처
+ *   §9.  포모도로 원형 프로그레스 링 위젯
+ *   §10. 다크모드 이미지 스마트 명도 필터
+ *   §11. FX 비활성화 오버라이드 (data-fx-* 어트리뷰트 가드)
+ *   §12. 페이지 전환 효과 (fade / slide / flip3d)
+ *   §13. 애니메이션 키프레임 라이브러리
+ * ─────────────────────────────────────────────────────────────────
+ */
+
+/* ══════════════════════════════════════════════════════════════════
+   §1. CSS 커스텀 프로퍼티 — FX 제어 토큰
+   ══════════════════════════════════════════════════════════════════ */
+:root {
+  /* 글래스모피즘 */
+  --fx-glass-blur:        12px;
+  --fx-glass-bg-light:    rgba(255, 255, 255, 0.72);
+  --fx-glass-bg-dark:     rgba(20, 18, 16, 0.76);
+  --fx-glass-border:      rgba(255, 255, 255, 0.22);
+  --fx-glass-shadow:      0 8px 32px rgba(0, 0, 0, 0.14), 0 1.5px 4px rgba(0,0,0,0.08);
+
+  /* 젠 모드 타이밍 */
+  --fx-zen-fade-in:       0.3s;
+  --fx-zen-fade-out:      0.8s;
+  --fx-zen-idle-delay:    2s;    /* 비활동 → 숨김 트리거 딜레이 */
+
+  /* 스크러버 HUD */
+  --fx-scrubber-h-default: 2px;
+  --fx-scrubber-h-hover:   8px;
+  --fx-scrubber-radius:    4px;
+  --fx-scrubber-transition: height 0.22s cubic-bezier(0.4,0,0.2,1),
+                             border-radius 0.22s ease;
+
+  /* 사이드바 플로팅 */
+  --fx-sidebar-radius:    20px;
+  --fx-sidebar-shadow:    0 24px 64px rgba(0,0,0,0.18), 0 4px 16px rgba(0,0,0,0.10);
+  --fx-sidebar-transition: transform 0.28s cubic-bezier(0.4,0,0.2,1),
+                            opacity  0.28s ease,
+                            box-shadow 0.22s ease;
+
+  /* 애니메이션 공통 */
+  --fx-anim-fast:   0.18s;
+  --fx-anim-normal: 0.28s;
+  --fx-anim-slow:   0.48s;
+
+  /* Drop Cap */
+  --fx-dropcap-size:      3.4em;
+  --fx-dropcap-line:      0.82;
+  --fx-dropcap-color:     var(--color-ink, #1a1814);
+
+  /* 포모도로 링 */
+  --fx-pomodoro-size:     120px;
+  --fx-pomodoro-stroke:   8px;
+  --fx-pomodoro-color:    #e85d3a;
+  --fx-pomodoro-track:    rgba(232,93,58,0.18);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §2. 글래스모피즘 툴바 — 상단 / 하단
+   ══════════════════════════════════════════════════════════════════ */
+.viewer-nav-bar,
+#viewer-nav-bar {
+  background: var(--fx-glass-bg-light);
+  backdrop-filter: blur(var(--fx-glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--fx-glass-blur)) saturate(180%);
+  border-bottom: 1px solid var(--fx-glass-border);
+  box-shadow: var(--fx-glass-shadow);
+  transition: background var(--fx-anim-normal) ease,
+              opacity    var(--fx-zen-fade-out) ease,
+              transform  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1);
+}
+
+.viewer-bottom-bar,
+#viewer-bottom-bar {
+  background: var(--fx-glass-bg-light);
+  backdrop-filter: blur(var(--fx-glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--fx-glass-blur)) saturate(180%);
+  border-top: 1px solid var(--fx-glass-border);
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.10), 0 -1.5px 4px rgba(0,0,0,0.06);
+  transition: background var(--fx-anim-normal) ease,
+              opacity    var(--fx-zen-fade-out) ease,
+              transform  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1);
+}
+
+/* 다크/세피아 테마 — 글래스 배경 오버라이드 */
+[data-theme="dark"] .viewer-nav-bar,
+[data-theme="dark"] #viewer-nav-bar,
+[data-theme="dark"] .viewer-bottom-bar,
+[data-theme="dark"] #viewer-bottom-bar {
+  background: var(--fx-glass-bg-dark);
+  border-color: rgba(255,255,255,0.10);
+}
+
+[data-theme="sepia"] .viewer-nav-bar,
+[data-theme="sepia"] #viewer-nav-bar,
+[data-theme="sepia"] .viewer-bottom-bar,
+[data-theme="sepia"] #viewer-bottom-bar {
+  background: rgba(241,235,214,0.80);
+}
+
+/* 서재 상단 TopBar 글래스 */
+#library-topbar {
+  background: var(--fx-glass-bg-light);
+  backdrop-filter: blur(var(--fx-glass-blur)) saturate(160%);
+  -webkit-backdrop-filter: blur(var(--fx-glass-blur)) saturate(160%);
+  border-bottom: 1px solid var(--fx-glass-border);
+  transition: background var(--fx-anim-normal) ease,
+              transform  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1),
+              opacity    var(--fx-anim-normal) ease;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §3. 젠 모드 — 자동 UI 숨김 (2초 비활동 시 페이드아웃)
+   ─────────────────────────────────────────────────────────────────
+   .zen-mode-active 클래스가 <body> 또는 #screen-viewer 에 추가되면
+   내부 nav/bottom-bar 가 opacity: 0 으로 페이드되어 숨겨집니다.
+   사용자 포인터/터치 시 .zen-mode-active 클래스가 즉시 제거됩니다.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 기본 상태: 항상 보임, 부드러운 페이드인 준비 */
+#viewer-nav-bar,
+#viewer-bottom-bar {
+  opacity: 1;
+  pointer-events: auto;
+  will-change: opacity, transform;
+}
+
+/* 젠 모드 활성화 시 — 페이드아웃 */
+body.zen-mode-active #viewer-nav-bar,
+body.zen-mode-active #viewer-bottom-bar,
+#screen-viewer.zen-mode-active #viewer-nav-bar,
+#screen-viewer.zen-mode-active #viewer-bottom-bar {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--fx-zen-fade-out) ease var(--fx-zen-idle-delay);
+}
+
+/* 젠 모드 해제 시 — 즉시 페이드인 */
+body:not(.zen-mode-active) #viewer-nav-bar,
+body:not(.zen-mode-active) #viewer-bottom-bar,
+#screen-viewer:not(.zen-mode-active) #viewer-nav-bar,
+#screen-viewer:not(.zen-mode-active) #viewer-bottom-bar {
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity var(--fx-zen-fade-in) ease;
+}
+
+/* nav-hidden / bottom-hidden 기존 클래스와의 협력 — z-layer 우선 */
+#viewer-nav-bar.nav-hidden {
+  transform: translateY(-100%);
+}
+#viewer-bottom-bar.bottom-hidden {
+  transform: translateY(100%);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §4. 미니멀 HUD 스크러버 — 2px 기본 / 호버 확장 + 챕터 툴팁
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 스크러버 래퍼 */
+#slider-scrubber,
+.slider-scrubber {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 18px;          /* 터치 영역 확보 */
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+/* 기본 track — 2px 선 형태 */
+#progress-range-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: var(--fx-scrubber-h-default);
+  border-radius: var(--fx-scrubber-radius);
+  background: linear-gradient(
+    to right,
+    var(--color-accent, #c8864a) 0%,
+    var(--color-accent, #c8864a) calc(var(--progress, 0) * 1%),
+    rgba(120,100,80,0.22)      calc(var(--progress, 0) * 1%),
+    rgba(120,100,80,0.22)      100%
+  );
+  outline: none;
+  cursor: pointer;
+  transition: var(--fx-scrubber-transition);
+}
+
+/* 호버 시 track 확장 */
+#slider-scrubber:hover #progress-range-slider,
+.slider-scrubber:hover #progress-range-slider,
+#progress-range-slider:hover,
+#progress-range-slider:focus-visible {
+  height: var(--fx-scrubber-h-hover);
+}
+
+/* 썸(thumb) 스타일 */
+#progress-range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-accent, #c8864a);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.22);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--fx-anim-fast) ease,
+              transform var(--fx-anim-fast) ease;
+}
+#progress-range-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-accent, #c8864a);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.22);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--fx-anim-fast) ease;
+}
+
+/* 호버/포커스 시 thumb 노출 */
+#slider-scrubber:hover #progress-range-slider::-webkit-slider-thumb,
+#progress-range-slider:hover::-webkit-slider-thumb,
+#progress-range-slider:focus-visible::-webkit-slider-thumb {
+  opacity: 1;
+  transform: scale(1.15);
+}
+#slider-scrubber:hover #progress-range-slider::-moz-range-thumb,
+#progress-range-slider:hover::-moz-range-thumb {
+  opacity: 1;
+}
+
+/* 챕터 툴팁 */
+#slider-tooltip {
+  position: fixed;
+  bottom: 56px;
+  z-index: 9999;
+  display: none;
+  background: var(--fx-glass-bg-light);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--fx-glass-border);
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-ink, #1a1814);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.16);
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 220px;
+  text-align: center;
+}
+#slider-tooltip::after {
+  content: '';
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 8px;
+  height: 5px;
+  background: inherit;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §5. 플로팅 TOC / 검색 사이드바 오버레이
+   ══════════════════════════════════════════════════════════════════ */
+#toc-sidebar {
+  border-radius: var(--fx-sidebar-radius);
+  box-shadow: var(--fx-sidebar-shadow);
+  overflow: hidden;
+  transition: var(--fx-sidebar-transition);
+  transform: translateX(-110%);
+  opacity: 0;
+}
+
+#toc-sidebar.open {
+  transform: translateX(0);
+  opacity: 1;
+  box-shadow: var(--fx-sidebar-shadow), 0 0 0 1px rgba(0,0,0,0.04);
+}
+
+/* 설정 패널 플로팅화 */
+#settings-panel {
+  border-radius: var(--fx-sidebar-radius) var(--fx-sidebar-radius) 0 0;
+  box-shadow: 0 -16px 48px rgba(0,0,0,0.18), 0 -2px 8px rgba(0,0,0,0.08);
+  overflow: hidden;
+  transition: transform var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1),
+              opacity   var(--fx-anim-normal) ease;
+  transform: translateY(12px);
+  opacity: 0;
+}
+#settings-panel.open {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+/* 검색 모달 플로팅 */
+#search-modal,
+#fts-modal,
+#stats-modal {
+  border-radius: var(--fx-sidebar-radius);
+  box-shadow: var(--fx-sidebar-shadow);
+  overflow: hidden;
+  animation: fx-popup-in var(--fx-anim-normal) cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §6. Drop Cap — 문단 첫 글자 대형 장식
+   ─────────────────────────────────────────────────────────────────
+   epub.js iframe 내에 직접 적용하려면 reapplyInlineTheme()으로
+   .fable-dropcap 클래스를 주입해야 합니다.
+   서재/뷰어 외부 콘텐츠 영역에도 적용 가능합니다.
+   ══════════════════════════════════════════════════════════════════ */
+.fable-dropcap p:first-of-type::first-letter,
+.epub-dropcap::first-letter {
+  float: left;
+  font-size: var(--fx-dropcap-size);
+  line-height: var(--fx-dropcap-line);
+  font-weight: 700;
+  margin: 0.04em 0.12em 0 0;
+  color: var(--fx-dropcap-color);
+  font-family: var(--font-display, Georgia, 'Noto Serif KR', serif);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §7. 스켈레톤 로딩 UI
+   ══════════════════════════════════════════════════════════════════ */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(120,100,80,0.10);
+  border-radius: 6px;
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255,255,255,0.55) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: fx-skeleton-shimmer 1.5s ease-in-out infinite;
+}
+.skeleton-card {
+  width: 100%;
+  height: 180px;
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+.skeleton-line {
+  height: 14px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+.skeleton-line.short { width: 60%; }
+.skeleton-line.medium { width: 80%; }
+.skeleton-line.long  { width: 95%; }
+
+/* 라이브러리 그리드 스켈레톤 */
+.library-grid-skeleton {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 16px;
+  padding: 16px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §8. 하이라이터 텍스처 효과 — SVG/CSS 마스킹
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 형광펜 스타일 하이라이트 */
+.annotation-highlight,
+[data-annotation-type="highlight"] {
+  position: relative;
+  border-radius: 2px;
+  mix-blend-mode: multiply;
+}
+
+/* 기본 노란 형광 */
+.annotation-highlight,
+[data-annotation-color="yellow"] {
+  background: linear-gradient(
+    104deg,
+    rgba(0,0,0,0) 0.9%,
+    rgba(255,220,80,0.78) 2.4%,
+    rgba(255,230,100,0.72) 35%,
+    rgba(255,215,60,0.82) 67%,
+    rgba(255,220,80,0.72) 96%,
+    rgba(0,0,0,0) 98%
+  );
+  /* SVG 마스킹 텍스처 — 손그림 질감 */
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='30'%3E%3Cfilter id='r'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.04' numOctaves='4' stitchTiles='stitch'/%3E%3CfeDisplacementMap in='SourceGraphic' scale='2'/%3E%3C/filter%3E%3Crect width='200' height='30' filter='url(%23r)' fill='white'/%3E%3C/svg%3E");
+  -webkit-mask-size: 200px 30px;
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='30'%3E%3Cfilter id='r'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.04' numOctaves='4' stitchTiles='stitch'/%3E%3CfeDisplacementMap in='SourceGraphic' scale='2'/%3E%3C/filter%3E%3Crect width='200' height='30' filter='url(%23r)' fill='white'/%3E%3C/svg%3E");
+  mask-size: 200px 30px;
+}
+
+/* 파란 하이라이트 변형 */
+[data-annotation-color="blue"] {
+  background: linear-gradient(
+    104deg,
+    rgba(0,0,0,0) 0.9%,
+    rgba(100,180,255,0.68) 2.4%,
+    rgba(120,190,255,0.62) 67%,
+    rgba(0,0,0,0) 98%
+  );
+  mix-blend-mode: multiply;
+}
+
+/* 초록 하이라이트 변형 */
+[data-annotation-color="green"] {
+  background: linear-gradient(
+    104deg,
+    rgba(0,0,0,0) 0.9%,
+    rgba(100,220,140,0.68) 2.4%,
+    rgba(120,230,160,0.62) 67%,
+    rgba(0,0,0,0) 98%
+  );
+  mix-blend-mode: multiply;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §9. 포모도로 원형 프로그레스 링 위젯
+   ══════════════════════════════════════════════════════════════════ */
+#pomodoro-popup,
+.pomodoro-widget {
+  position: fixed;
+  bottom: 80px;
+  right: 20px;
+  z-index: 8000;
+  background: var(--fx-glass-bg-light);
+  backdrop-filter: blur(14px) saturate(180%);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
+  border: 1px solid var(--fx-glass-border);
+  border-radius: 20px;
+  box-shadow: var(--fx-sidebar-shadow);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 160px;
+  animation: fx-popup-in var(--fx-anim-normal) cubic-bezier(0.34,1.56,0.64,1) both;
+  transition: opacity var(--fx-anim-fast) ease,
+              transform var(--fx-anim-fast) ease;
+}
+#pomodoro-popup[hidden],
+.pomodoro-widget[hidden] {
+  display: none !important;
+}
+
+/* SVG 링 컨테이너 */
+.pomodoro-ring-wrap {
+  position: relative;
+  width: var(--fx-pomodoro-size);
+  height: var(--fx-pomodoro-size);
+}
+.pomodoro-ring-svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.pomodoro-ring-track {
+  fill: none;
+  stroke: var(--fx-pomodoro-track);
+  stroke-width: var(--fx-pomodoro-stroke);
+}
+.pomodoro-ring-progress {
+  fill: none;
+  stroke: var(--fx-pomodoro-color);
+  stroke-width: var(--fx-pomodoro-stroke);
+  stroke-linecap: round;
+  stroke-dasharray: 314.16;     /* 2π × r(50) */
+  stroke-dashoffset: 314.16;    /* JS에서 업데이트: 314.16 × (1 - ratio) */
+  transition: stroke-dashoffset 0.8s cubic-bezier(0.4,0,0.2,1),
+              stroke 0.4s ease;
+}
+/* 뽀모도로 마지막 1분 — 빨간색 경고 */
+.pomodoro-ring-progress.warning {
+  stroke: #e74c3c;
+  animation: fx-ring-pulse 0.6s ease-in-out infinite alternate;
+}
+
+/* 중앙 시간 표시 */
+.pomodoro-time-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-ink, #1a1814);
+  letter-spacing: -0.5px;
+}
+.pomodoro-phase-label {
+  font-size: 11px;
+  color: var(--color-ink-muted, #7a6a5a);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-top: -4px;
+}
+.pomodoro-controls {
+  display: flex;
+  gap: 8px;
+}
+.pomodoro-btn {
+  background: rgba(120,100,80,0.10);
+  border: 1px solid rgba(120,100,80,0.16);
+  border-radius: 10px;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--color-ink, #1a1814);
+  transition: background var(--fx-anim-fast) ease,
+              transform  var(--fx-anim-fast) ease;
+}
+.pomodoro-btn:hover {
+  background: rgba(120,100,80,0.18);
+  transform: scale(1.04);
+}
+.pomodoro-btn:active { transform: scale(0.97); }
+
+/* ══════════════════════════════════════════════════════════════════
+   §10. 다크모드 이미지 스마트 명도 필터
+   ══════════════════════════════════════════════════════════════════ */
+[data-theme="dark"] #viewer-viewport img,
+[data-theme="dark"] .epub-container img {
+  filter: brightness(0.82) contrast(1.06);
+  transition: filter var(--fx-anim-normal) ease;
+}
+/* 다크모드에서 이미지에 마우스 올리면 원본 밝기로 복원 */
+[data-theme="dark"] #viewer-viewport img:hover,
+[data-theme="dark"] .epub-container img:hover {
+  filter: brightness(1) contrast(1);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §11. FX 비활성화 오버라이드 — data-fx-* 어트리뷰트 가드
+   ─────────────────────────────────────────────────────────────────
+   [html] 또는 [body] 에 data-fx-anim="off", data-fx-blur="off",
+   data-fx-zen="off" 가 설정되면 해당 FX를 전역 비활성화합니다.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── A. 애니메이션 전체 비활성화 ── */
+html[data-fx-anim="off"] *,
+html[data-fx-anim="off"] *::before,
+html[data-fx-anim="off"] *::after {
+  animation-duration:        0.01ms !important;
+  animation-iteration-count: 1      !important;
+  transition-duration:       0.01ms !important;
+  transition-delay:          0s     !important;
+  scroll-behavior:           auto   !important;
+}
+
+/* ── B. 글래스모피즘 / 백드롭 블러 비활성화 ── */
+html[data-fx-blur="off"] .viewer-nav-bar,
+html[data-fx-blur="off"] #viewer-nav-bar,
+html[data-fx-blur="off"] .viewer-bottom-bar,
+html[data-fx-blur="off"] #viewer-bottom-bar,
+html[data-fx-blur="off"] #library-topbar,
+html[data-fx-blur="off"] #toc-sidebar,
+html[data-fx-blur="off"] #settings-panel,
+html[data-fx-blur="off"] #search-modal,
+html[data-fx-blur="off"] #fts-modal,
+html[data-fx-blur="off"] #stats-modal,
+html[data-fx-blur="off"] #pomodoro-popup,
+html[data-fx-blur="off"] .pomodoro-widget,
+html[data-fx-blur="off"] #slider-tooltip {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: var(--color-bg, #f4f1ea) !important;
+  border-color: rgba(0,0,0,0.10) !important;
+}
+
+/* 다크 테마 폴백 */
+[data-theme="dark"] html[data-fx-blur="off"] .viewer-nav-bar,
+[data-theme="dark"] html[data-fx-blur="off"] #viewer-nav-bar,
+[data-theme="dark"] html[data-fx-blur="off"] .viewer-bottom-bar,
+[data-theme="dark"] html[data-fx-blur="off"] #viewer-bottom-bar {
+  background: #1a1816 !important;
+}
+
+/* ── C. 젠 모드 비활성화 — 항시 바 노출 강제 ── */
+html[data-fx-zen="off"] body.zen-mode-active #viewer-nav-bar,
+html[data-fx-zen="off"] body.zen-mode-active #viewer-bottom-bar,
+html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-nav-bar,
+html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  transition: none !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §12. 페이지 전환 효과
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Fade */
+.page-transition-fade .epubjs-view {
+  animation: fx-page-fade var(--fx-anim-normal) ease both;
+}
+
+/* Slide */
+.page-transition-slide .epubjs-view--next {
+  animation: fx-page-slide-in  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1) both;
+}
+.page-transition-slide .epubjs-view--prev {
+  animation: fx-page-slide-out var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1) both;
+}
+
+/* Flip 3D */
+.page-transition-flip3d .epubjs-view {
+  animation: fx-page-flip var(--fx-anim-slow) cubic-bezier(0.4,0,0.2,1) both;
+  transform-origin: left center;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §13. 키프레임 라이브러리
+   ══════════════════════════════════════════════════════════════════ */
+@keyframes fx-skeleton-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+@keyframes fx-popup-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes fx-ring-pulse {
+  from { opacity: 1;    stroke-width: var(--fx-pomodoro-stroke); }
+  to   { opacity: 0.65; stroke-width: calc(var(--fx-pomodoro-stroke) + 3px); }
+}
+
+@keyframes fx-page-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes fx-page-slide-in {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+@keyframes fx-page-slide-out {
+  from { transform: translateX(-100%); opacity: 0; }
+  to   { transform: translateX(0);     opacity: 1; }
+}
+
+@keyframes fx-page-flip {
+  from { transform: perspective(1200px) rotateY(-18deg); opacity: 0.4; }
+  to   { transform: perspective(1200px) rotateY(0deg);   opacity: 1;   }
+}
+
+@keyframes fx-toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §14. 반응형 미디어 쿼리 — 모바일 최적화
+   ══════════════════════════════════════════════════════════════════ */
+@media (max-width: 600px) {
+  :root {
+    --fx-pomodoro-size: 96px;
+    --fx-sidebar-radius: 16px;
+  }
+  #pomodoro-popup,
+  .pomodoro-widget {
+    bottom: 70px;
+    right: 12px;
+    padding: 14px 16px;
+  }
+  .pomodoro-time-label {
+    font-size: 18px;
+  }
+}
+
+/* 저전력 모드 / 모션 감소 OS 설정 자동 연동 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration:        0.01ms !important;
+    animation-iteration-count: 1      !important;
+    transition-duration:       0.01ms !important;
+  }
+  .skeleton::after {
+    animation: none !important;
+  }
+}

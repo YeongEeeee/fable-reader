@@ -1,14 +1,21 @@
 /**
- * src/ui/settings.js  ── Fable Premium v4.0
+ * src/ui/settings.js  ── Fable Premium v5.0
  * ───────────────────────────────────────────────────────────────────
  * 공용 설정 UI (서재/뷰어 양쪽에서 사용)
  *
- * 변경 사항 (v4.0):
- *   - [1] fontWeightBoost 슬라이더 바인딩 (E-Ink 폰트 굵기 보정)
- *   - [1] contrastScale 슬라이더 바인딩 (대비 미세 조절)
- *   - [1] eyeProtectMinutes 입력 바인딩 (눈 보호 타이머 시간 설정)
- *   - [3] pageTransition 라디오 바인딩 (fade|slide|flip3d)
- *   - [2] FontLazyLoader.apply() → waitForFontsWithTimeout 1.5s 가드 통합
+ * 변경 사항 (v5.0):
+ *   - [FX] initFxSettingsUI(): 비주얼 특수효과 제어 섹션 신설
+ *     A) fxAnimation  토글 — 애니메이션 및 페이지 전환 효과
+ *     B) fxBlur       토글 — 글래스모피즘 및 백드롭 블러
+ *     C) fxZenMode    토글 — 몰입형 젠 모드 자동 UI 숨김
+ *   - _saveStateToLS / _loadStateFromLS FX 상태 항목 확장
+ *   - applyFxState(): html data-fx-* 어트리뷰트 선언적 바인딩
+ *
+ * 변경 사항 (v4.0 — 유지):
+ *   - fontWeightBoost 슬라이더 바인딩
+ *   - contrastScale 슬라이더 바인딩
+ *   - eyeProtectMinutes 입력 바인딩
+ *   - pageTransition 라디오/버튼 바인딩
  *   - STATE_KEY 저장 항목 확장
  * ───────────────────────────────────────────────────────────────────
  */
@@ -48,7 +55,6 @@ function initFontUploader() {
    ══════════════════════════════════════════════════════════════════ */
 const FontLazyLoader = (() => {
   const loaded = new Set();
-  /* 폰트 정의: id → { label, family, href(웹폰트), local(시스템) } */
   const FONTS = {
     'gowun':  { label: '고운바탕', family: "'Gowun Batang', serif",        href: 'https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&display=swap' },
     'noto':   { label: '본명조',   family: "'Noto Serif KR', serif",        href: 'https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;700&display=swap' },
@@ -67,23 +73,15 @@ const FontLazyLoader = (() => {
     });
   }
 
-  /**
-   * 선택 시점에만 비동기 로드 후 rendition에 적용
-   * [v4.0] waitForFontsWithTimeout 1.5s 타임아웃 가드:
-   *   - document.fonts.load가 무한 대기에 빠지지 않도록 보호
-   *   - 타임아웃 시 시스템 기본 서체로 자동 폴백
-   */
   async function apply(fontId) {
     const def = FONTS[fontId];
     if (!def) return;
     if (!loaded.has(fontId)) {
       Toast.show(`${def.label} 서체 로딩 중...`, 'info');
       await _injectStylesheet(def.href);
-      /* [v4.0] 1.5초 타임아웃 가드 — 무한 대기 차단 */
       if (def.href) {
         const fontLoaded = await waitForFontsWithTimeout(def.family, 1500);
         if (!fontLoaded) {
-          /* 폴백: 시스템 서체 유지하고 경고만 표시 */
           console.warn(`[FontLazyLoader] ${def.label} 폰트 로딩 타임아웃 — 시스템 서체로 폴백`);
           Toast.show(`${def.label} 로딩이 지연되어 시스템 서체를 사용합니다.`, 'info');
         }
@@ -92,7 +90,6 @@ const FontLazyLoader = (() => {
     }
     if (store.rendition) {
       try { store.rendition.themes.override('font-family', def.family + ' !important'); } catch (_) {}
-      /* [버그 3B] 인라인 테마도 즉시 재주입 (현재 iframe 문서에 반영) */
       try { reapplyInlineTheme(); } catch (_) {}
     }
     store.fontFamily = fontId;
@@ -106,7 +103,6 @@ const FontLazyLoader = (() => {
 function initFontSelector() {
   const sel = DOMProxy.get('font-family-select');
   if (!DOMProxy.exists('font-family-select')) return;
-  /* 옵션 채우기 */
   sel.innerHTML = '';
   FontLazyLoader.list().forEach(({ id, label }) => {
     const opt = document.createElement('option');
@@ -149,15 +145,12 @@ function initCustomThemeBuilder() {
 
 /* ══════════════════════════════════════════════════════════════════
    [v4.0] §31-A. 폰트 굵기 보정 슬라이더 (fontWeightBoost)
-   E-Ink 단말기 및 저가형 디바이스용 가독성 향상
-   범위: -100 ~ +400 (기본 0)
    ══════════════════════════════════════════════════════════════════ */
 function initFontWeightBoostSlider() {
   const slider  = DOMProxy.get('input-font-weight-boost');
   const display = DOMProxy.get('font-weight-boost-val');
   if (!DOMProxy.exists('input-font-weight-boost')) return;
 
-  /* 초기값 동기 */
   slider.value = String(store.fontWeightBoost ?? 0);
   setTextSafe(display, String(store.fontWeightBoost ?? 0));
 
@@ -166,11 +159,9 @@ function initFontWeightBoostSlider() {
     store.fontWeightBoost = v;
     setTextSafe(display, String(v));
     _saveStateToLS();
-    /* 즉시 iframe 재주입 */
     try { reapplyInlineTheme(); } catch (_) {}
   });
 
-  /* ReactiveStore 구독 — 외부(main.js)에서 store 변경 시 UI 동기화 */
   ReactiveStore.subscribe('fontWeightBoost', (v) => {
     if (slider.value !== String(v)) {
       slider.value = String(v);
@@ -181,7 +172,6 @@ function initFontWeightBoostSlider() {
 
 /* ══════════════════════════════════════════════════════════════════
    [v4.0] §31-B. 대비 스케일러 슬라이더 (contrastScale)
-   범위: 0.5 ~ 2.0 (기본 1.0, 소수점 0.05 단위)
    ══════════════════════════════════════════════════════════════════ */
 function initContrastScaleSlider() {
   const slider  = DOMProxy.get('input-contrast-scale');
@@ -211,7 +201,6 @@ function initContrastScaleSlider() {
 
 /* ══════════════════════════════════════════════════════════════════
    [v4.0] §31-C. 눈 보호 타이머 분 설정 (eyeProtectMinutes)
-   독립 number input — 기본 50분
    ══════════════════════════════════════════════════════════════════ */
 function initEyeProtectMinutesInput() {
   const input   = DOMProxy.get('input-eye-protect-minutes');
@@ -240,33 +229,23 @@ function initEyeProtectMinutesInput() {
 
 /* ══════════════════════════════════════════════════════════════════
    [v4.0] §31-D. 페이지 전환 옵션 선택 UI (pageTransition)
-   라디오 버튼 또는 data-transition 버튼 그룹
-   값: 'fade' | 'slide' | 'flip3d'
    ══════════════════════════════════════════════════════════════════ */
 function initPageTransitionSelector() {
-  /* 라디오 방식 */
   const radios = document.querySelectorAll('input[name="page-transition"]');
   if (radios.length > 0) {
-    /* 초기값 */
     const cur = store.pageTransition || 'fade';
     radios.forEach(r => { r.checked = (r.value === cur); });
-
     radios.forEach(r => {
       r.addEventListener('change', () => {
-        if (r.checked) {
-          store.pageTransition = r.value;
-          _saveStateToLS();
-        }
+        if (r.checked) { store.pageTransition = r.value; _saveStateToLS(); }
       });
     });
-
     ReactiveStore.subscribe('pageTransition', (v) => {
       radios.forEach(r => { r.checked = (r.value === v); });
     });
     return;
   }
 
-  /* data-transition 버튼 그룹 방식 */
   const btns = DOMProxy.qa('[data-transition]');
   if (btns.length > 0) {
     const cur = store.pageTransition || 'fade';
@@ -284,7 +263,6 @@ function initPageTransitionSelector() {
         });
       });
     });
-
     ReactiveStore.subscribe('pageTransition', (v) => {
       btns.forEach(b => {
         b.classList.toggle('active', b.dataset.transition === v);
@@ -318,24 +296,28 @@ function initOfflineBanner() {
 
 
 /* ══════════════════════════════════════════════════════════════════
-   §35. 설정 저장 / 복원 — [v4.0] 항목 확장
+   §35. 설정 저장 / 복원 — [v5.0] FX 항목 추가
    ══════════════════════════════════════════════════════════════════ */
 function _saveStateToLS() {
   const snap = {
-    fontSize:         store.fontSize,
-    lineHeight:       store.lineHeight,
-    theme:            store.theme,
-    flow:             store.flow,
-    userBg:           store.userBg,
-    userInk:          store.userInk,
-    userSpacing:      store.userSpacing,
-    userLeading:      store.userLeading,
+    fontSize:          store.fontSize,
+    lineHeight:        store.lineHeight,
+    theme:             store.theme,
+    flow:              store.flow,
+    userBg:            store.userBg,
+    userInk:           store.userInk,
+    userSpacing:       store.userSpacing,
+    userLeading:       store.userLeading,
     /* [v4.0] 신규 저장 항목 */
-    fontWeightBoost:  store.fontWeightBoost ?? 0,
-    contrastScale:    store.contrastScale   ?? 1.0,
+    fontWeightBoost:   store.fontWeightBoost  ?? 0,
+    contrastScale:     store.contrastScale    ?? 1.0,
     eyeProtectMinutes: store.eyeProtectMinutes ?? 50,
-    pageTransition:   store.pageTransition  ?? 'fade',
-    onboardingDone:   store.onboardingDone  ?? false,
+    pageTransition:    store.pageTransition   ?? 'fade',
+    onboardingDone:    store.onboardingDone   ?? false,
+    /* [v5.0] FX 상태 저장 */
+    fxAnimation:       store.fxAnimation      ?? true,
+    fxBlur:            store.fxBlur           ?? true,
+    fxZenMode:         store.fxZenMode        ?? true,
   };
   try { localStorage.setItem(STATE_KEY, JSON.stringify(snap)); } catch (_) {}
 }
@@ -359,19 +341,231 @@ function _loadStateFromLS() {
       eyeProtectMinutes: s.eyeProtectMinutes ?? 50,
       pageTransition:    s.pageTransition    ?? 'fade',
       onboardingDone:    s.onboardingDone    ?? false,
+      /* [v5.0] FX 상태 복원 */
+      fxAnimation:       s.fxAnimation       ?? true,
+      fxBlur:            s.fxBlur            ?? true,
+      fxZenMode:         s.fxZenMode         ?? true,
     });
   } catch (_) {}
 }
 
-/**
- * [v4.0] 신규 설정 UI 전체 초기화 진입점
- * main.js의 initButtonEventHandlers() 내에서 호출
- */
+
+/* ══════════════════════════════════════════════════════════════════
+   [v5.0] §34-FX. 비주얼 특수효과(FX) 제어 — 핵심 로직
+   ─────────────────────────────────────────────────────────────────
+   applyFxState():
+     store.fxAnimation / fxBlur / fxZenMode 값을 읽어
+     <html> 엘리먼트의 data-fx-* 어트리뷰트를 선언적으로 설정.
+     fx.css의 §11 가드 셀렉터가 이를 감지해 효과를 비활성화함.
+   ══════════════════════════════════════════════════════════════════ */
+function applyFxState() {
+  const html = document.documentElement;
+
+  /* A: 애니메이션 */
+  if (store.fxAnimation === false) {
+    html.setAttribute('data-fx-anim', 'off');
+  } else {
+    html.removeAttribute('data-fx-anim');
+  }
+
+  /* B: 글래스모피즘 블러 */
+  if (store.fxBlur === false) {
+    html.setAttribute('data-fx-blur', 'off');
+  } else {
+    html.removeAttribute('data-fx-blur');
+  }
+
+  /* C: 젠 모드 */
+  if (store.fxZenMode === false) {
+    html.setAttribute('data-fx-zen', 'off');
+  } else {
+    html.removeAttribute('data-fx-zen');
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   FX 설정 UI 헬퍼 — 단일 토글 바인딩 생성
+   ────────────────────────────────────────────────────────────────── */
+function _bindFxToggle(checkboxId, storeKey) {
+  const el = DOMProxy.get(checkboxId);
+  if (!el || el === DOMProxy.VOID_NODE) return;
+
+  /* 초기 상태 동기 */
+  el.checked = store[storeKey] !== false;
+
+  el.addEventListener('change', () => {
+    store[storeKey] = el.checked;
+    applyFxState();
+    _saveStateToLS();
+  });
+
+  /* ReactiveStore 구독 — 외부에서 상태 변경 시 UI 동기화 */
+  ReactiveStore.subscribe(storeKey, (v) => {
+    el.checked = (v !== false);
+    applyFxState();
+  });
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   FX 섹션 동적 삽입 — settings-panel 하단에 마운트
+   index.html에 #fx-settings-section 요소가 없을 경우에만 동적 생성.
+   이미 HTML에 마크업이 존재하면 바인딩만 수행.
+   ────────────────────────────────────────────────────────────────── */
+function _mountFxSection() {
+  /* 이미 HTML 내에 섹션이 존재하는 경우 → 바인딩만 */
+  if (DOMProxy.exists('fx-settings-section')) {
+    _bindFxToggle('fx-toggle-animation', 'fxAnimation');
+    _bindFxToggle('fx-toggle-blur',      'fxBlur');
+    _bindFxToggle('fx-toggle-zen',       'fxZenMode');
+    return;
+  }
+
+  /* settings-panel 내부에 삽입할 부모 탐색 */
+  const panel = DOMProxy.get('settings-panel');
+  if (!panel || panel === DOMProxy.VOID_NODE) return;
+
+  /* 섹션 마크업 생성 — XSS 방어: textContent/setAttribute 사용 */
+  const section = document.createElement('div');
+  section.id = 'fx-settings-section';
+  section.className = 'settings-section fx-section';
+
+  /* 섹션 헤더 */
+  const header = document.createElement('div');
+  header.className = 'settings-section-header';
+  const title = document.createElement('h3');
+  title.className = 'settings-section-title';
+  title.textContent = '✨ 비주얼 효과 및 애니메이션 설정';
+  header.appendChild(title);
+  section.appendChild(header);
+
+  /* 토글 항목 정의 */
+  const items = [
+    {
+      id:          'fx-toggle-animation',
+      storeKey:    'fxAnimation',
+      label:       '애니메이션 및 페이지 전환 효과',
+      description: '3D 플립, 페이드, 팝업 트랜지션을 활성화합니다.',
+    },
+    {
+      id:          'fx-toggle-blur',
+      storeKey:    'fxBlur',
+      label:       '글래스모피즘 및 백드롭 블러 효과',
+      description: '상하단 바에 반투명 블러 배경을 적용합니다. 저사양 기기에서는 끄면 성능이 향상됩니다.',
+    },
+    {
+      id:          'fx-toggle-zen',
+      storeKey:    'fxZenMode',
+      label:       '몰입형 젠 모드 (자동 UI 숨김)',
+      description: '2초간 조작이 없으면 상하단 바를 자동으로 숨깁니다.',
+    },
+  ];
+
+  items.forEach(item => {
+    const row = document.createElement('label');
+    row.className = 'fx-toggle-row';
+    row.htmlFor = item.id;
+
+    /* 텍스트 그룹 */
+    const textGroup = document.createElement('div');
+    textGroup.className = 'fx-toggle-text';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'fx-toggle-label';
+    labelEl.textContent = item.label;
+
+    const descEl = document.createElement('span');
+    descEl.className = 'fx-toggle-desc';
+    descEl.textContent = item.description;
+
+    textGroup.appendChild(labelEl);
+    textGroup.appendChild(descEl);
+
+    /* 토글 스위치 */
+    const switchWrap = document.createElement('div');
+    switchWrap.className = 'fx-toggle-switch-wrap';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.id   = item.id;
+    checkbox.className = 'fx-toggle-checkbox';
+    checkbox.checked = store[item.storeKey] !== false;
+
+    /* 커스텀 스위치 트랙 */
+    const track = document.createElement('span');
+    track.className = 'fx-toggle-track';
+    track.setAttribute('aria-hidden', 'true');
+
+    switchWrap.appendChild(checkbox);
+    switchWrap.appendChild(track);
+
+    row.appendChild(textGroup);
+    row.appendChild(switchWrap);
+    section.appendChild(row);
+  });
+
+  /* 인라인 스타일 — fx.css가 로드되기 전 최소 레이아웃 보장 */
+  const style = document.createElement('style');
+  style.textContent = `
+    .fx-section { padding: 16px 20px 20px; border-top: 1px solid rgba(120,100,80,0.12); }
+    .settings-section-title { font-size: 13px; font-weight: 600; color: var(--color-ink-muted, #7a6a5a); margin: 0 0 14px; letter-spacing: 0.3px; }
+    .fx-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; cursor: pointer; border-bottom: 1px solid rgba(120,100,80,0.07); }
+    .fx-toggle-row:last-of-type { border-bottom: none; }
+    .fx-toggle-text { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    .fx-toggle-label { font-size: 13.5px; font-weight: 500; color: var(--color-ink, #1a1814); }
+    .fx-toggle-desc  { font-size: 11.5px; color: var(--color-ink-muted, #8a7a6a); line-height: 1.4; }
+    .fx-toggle-switch-wrap { position: relative; flex-shrink: 0; }
+    .fx-toggle-checkbox { position: absolute; opacity: 0; width: 0; height: 0; }
+    .fx-toggle-track {
+      display: block; width: 44px; height: 24px; border-radius: 12px;
+      background: rgba(120,100,80,0.22); cursor: pointer;
+      transition: background 0.22s ease, box-shadow 0.22s ease;
+      position: relative;
+    }
+    .fx-toggle-track::after {
+      content: ''; position: absolute; top: 3px; left: 3px;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.22);
+      transition: transform 0.22s cubic-bezier(0.4,0,0.2,1), background 0.22s ease;
+    }
+    .fx-toggle-checkbox:checked + .fx-toggle-track {
+      background: var(--color-accent, #c8864a);
+      box-shadow: 0 0 0 2px rgba(200,134,74,0.22);
+    }
+    .fx-toggle-checkbox:checked + .fx-toggle-track::after { transform: translateX(20px); }
+    .fx-toggle-checkbox:focus-visible + .fx-toggle-track { outline: 2px solid var(--color-accent, #c8864a); outline-offset: 2px; }
+  `;
+  document.head.appendChild(style);
+
+  /* 패널 하단에 삽입 */
+  panel.appendChild(section);
+
+  /* 이벤트 바인딩 */
+  items.forEach(item => {
+    _bindFxToggle(item.id, item.storeKey);
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   [v5.0] FX 설정 전체 초기화 진입점
+   ══════════════════════════════════════════════════════════════════ */
+function initFxSettingsUI() {
+  _mountFxSection();
+  /* 부팅 시 저장된 FX 상태를 즉시 html 어트리뷰트에 반영 */
+  applyFxState();
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+   [v4.0] §신규 설정 UI 전체 초기화 진입점 — v5.0 FX 추가
+   main.js의 initButtonEventHandlers() 내에서 호출
+   ══════════════════════════════════════════════════════════════════ */
 function initV4SettingsUI() {
   initFontWeightBoostSlider();
   initContrastScaleSlider();
   initEyeProtectMinutesInput();
   initPageTransitionSelector();
+  /* [v5.0] FX 제어 패널 추가 초기화 */
+  initFxSettingsUI();
 }
 
 
@@ -389,4 +583,6 @@ export {
   initOfflineBanner,
   _saveStateToLS,
   _loadStateFromLS,
+  applyFxState,
+  initFxSettingsUI,
 };
