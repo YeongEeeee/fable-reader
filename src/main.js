@@ -58,12 +58,12 @@ import {
   AnnotationManager, initContextMenu, TTSSystem, bindScrollTopButton,
   MetadataEditor, AnnotationExporter, LibraryFullTextSearch, CloudBackup, Pomodoro,
   ReadingReport, OnboardingGuide,
-} from './viewer.js';
+} from './ui/viewer.js';
 import {
   initFontUploader, initFontSelector, initCustomThemeBuilder,
   initV4SettingsUI,
   showKeyboardHint, initOfflineBanner, _saveStateToLS, _loadStateFromLS,
-} from './settings.js';
+} from './ui/settings.js';
 
 /* ══════════════════════════════════════════════════════════════════
    환경 변수 Null-Safe 접근
