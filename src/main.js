@@ -43,14 +43,11 @@
 
 'use strict';
 
+/* 1. 코어 상태 엔진 및 유틸리티 모듈 (동일 디렉터리) */
 import {
   store, ReactiveStore, DOMProxy, ErrorBoundary, Toast,
   setTextSafe, LH_MAP,
 } from './store.js';
-import {
-  LoadingOverlay, ResizeMask, ImportProgress,
-  showViewerScreen, showUploaderScreen,
-} from './ui.js';
 import { StorageSystem } from './database.js';
 import { AnnotationSyncEngine } from './sync.js';
 import {
@@ -60,22 +57,32 @@ import {
   NavGuard, isEpubRuntimeReady, waitForEpubJS,
   EyeProtectTimer, AutoScrollDriver, WPMTracker,
 } from './reader.js';
+
+/* 2. 전역 공용 UI 레이어 모듈 (동일 디렉터리) */
+import {
+  LoadingOverlay, ResizeMask, ImportProgress,
+  showViewerScreen, showUploaderScreen,
+} from './ui.js';
+
+/* 3. [경로 교정] src/ui/ 서브 디렉터리 내부 UI 특화 상호작용 모듈 */
 import {
   HashWorker, refreshLibraryData, renderLibraryGrid, importEpubFiles,
-} from './uploader.js';
+} from './ui/uploader.js';
+
 import {
   renderTocSidebar, updateTocActiveItem,
   ReadingStatsTracker, SearchEngine, VirtualSearchList, runSearchExecution,
   AnnotationManager, initContextMenu, TTSSystem, bindScrollTopButton,
   MetadataEditor, AnnotationExporter, LibraryFullTextSearch, CloudBackup, Pomodoro,
   ReadingReport, OnboardingGuide,
-} from './viewer.js';
+} from './ui/viewer.js';
+
 import {
   initFontUploader, initFontSelector, initCustomThemeBuilder,
-  initV4SettingsUI,
+  initV4SettingsUI, initFxSettingsUI, // <-- v5.0 비주얼 효과 초기화 엔진 통합
   showKeyboardHint, initOfflineBanner, _saveStateToLS, _loadStateFromLS,
   applyFxState,
-} from './settings.js';
+} from './ui/settings.js';
 
 /* ══════════════════════════════════════════════════════════════════
    환경 변수 Null-Safe 접근
