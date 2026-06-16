@@ -549,4 +549,4 @@ const AnnotationSyncEngine = (() => {
   };
 })();
 
-export { AnnotationSyncEngine, CRDTVectorClock, AtomicTaskQueue, ChunkedStorage };
+export { AnnotationSyncEngine, CRDTVectorClock, AtomicTaskQueue };
