@@ -3,20 +3,32 @@
  * ─────────────────────────────────────────────────────────────────
  * 비주얼 특수효과(FX) 전역 스타일시트
  *
- * 구조:
+ * v5.0 신규 사항:
+ *   §14. 세피아 그라디언트 스켈레톤 웨이브 (업그레이드)
+ *   §15. 서재 최근 읽은 책 슬라이드인 카드 애니메이션
+ *   §16. 태그 필터 Flip 카드 트랜지션
+ *   §17. 목표 달성 앰버 파티클 세레머니
+ *   §18. 스마트 태그 폴더 그리드 비주얼
+ *   §19. 태그 컨텍스트 글래스모피즘 팝오버
+ *   §20. 컴팩트 리스트 뷰 스타일
+ *   §21. Dashboard HUD 영역 스타일
+ *   §22. 모바일 임포트 브리지 버튼
+ *   (반응형 미디어 쿼리 §23)
+ *
+ * 보존:
  *   §1.  CSS 커스텀 프로퍼티 (FX 제어 토큰)
  *   §2.  글래스모피즘 툴바 (상/하단)
- *   §3.  젠 모드 — 자동 UI 숨김 오케스트레이션
- *   §4.  미니멀 HUD 스크러버 (2px 기본 / 호버 확장)
- *   §5.  플로팅 TOC / 검색 사이드바 오버레이
- *   §6.  Drop Cap 문단 첫 글자 장식
- *   §7.  스켈레톤 로딩 UI
- *   §8.  하이라이터 SVG/CSS 마스킹 텍스처
- *   §9.  포모도로 원형 프로그레스 링 위젯
- *   §10. 다크모드 이미지 스마트 명도 필터
- *   §11. FX 비활성화 오버라이드 (data-fx-* 어트리뷰트 가드)
- *   §12. 페이지 전환 효과 (fade / slide / flip3d)
- *   §13. 애니메이션 키프레임 라이브러리
+ *   §3.  젠 모드 — 자동 UI 숨김
+ *   §4.  미니멀 HUD 스크러버
+ *   §5.  플로팅 TOC / 검색 사이드바
+ *   §6.  Drop Cap
+ *   §7.  스켈레톤 로딩 UI (기존 보존 + §14 확장)
+ *   §8.  하이라이터 SVG/CSS 텍스처
+ *   §9.  포모도로 원형 프로그레스 링
+ *   §10. 다크모드 이미지 필터
+ *   §11. FX 비활성화 가드
+ *   §12. 페이지 전환 효과
+ *   §13. 키프레임 라이브러리
  * ─────────────────────────────────────────────────────────────────
  */
 
@@ -34,7 +46,7 @@
   /* 젠 모드 타이밍 */
   --fx-zen-fade-in:       0.3s;
   --fx-zen-fade-out:      0.8s;
-  --fx-zen-idle-delay:    2s;    /* 비활동 → 숨김 트리거 딜레이 */
+  --fx-zen-idle-delay:    2s;
 
   /* 스크러버 HUD */
   --fx-scrubber-h-default: 2px;
@@ -65,6 +77,19 @@
   --fx-pomodoro-stroke:   8px;
   --fx-pomodoro-color:    #e85d3a;
   --fx-pomodoro-track:    rgba(232,93,58,0.18);
+
+  /* 세피아 스켈레톤 */
+  --fx-skel-sepia-1:  #ede4d4;
+  --fx-skel-sepia-2:  #d8ccb8;
+  --fx-skel-amber:    #e2c48a;
+  --fx-skel-warm:     #f0e8d4;
+
+  /* 태그 폴더 */
+  --fx-tag-folder-radius: 14px;
+  --fx-tag-folder-shadow: 0 4px 16px rgba(0,0,0,0.07);
+
+  /* 파티클 */
+  --fx-particle-color: #c8864a;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -94,7 +119,6 @@
               transform  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1);
 }
 
-/* 다크/세피아 테마 — 글래스 배경 오버라이드 */
 [data-theme="dark"] .viewer-nav-bar,
 [data-theme="dark"] #viewer-nav-bar,
 [data-theme="dark"] .viewer-bottom-bar,
@@ -110,7 +134,6 @@
   background: rgba(241,235,214,0.80);
 }
 
-/* 서재 상단 TopBar 글래스 */
 #library-topbar {
   background: var(--fx-glass-bg-light);
   backdrop-filter: blur(var(--fx-glass-blur)) saturate(160%);
@@ -122,14 +145,8 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §3. 젠 모드 — 자동 UI 숨김 (2초 비활동 시 페이드아웃)
-   ─────────────────────────────────────────────────────────────────
-   .zen-mode-active 클래스가 <body> 또는 #screen-viewer 에 추가되면
-   내부 nav/bottom-bar 가 opacity: 0 으로 페이드되어 숨겨집니다.
-   사용자 포인터/터치 시 .zen-mode-active 클래스가 즉시 제거됩니다.
+   §3. 젠 모드 — 자동 UI 숨김
    ══════════════════════════════════════════════════════════════════ */
-
-/* 기본 상태: 항상 보임, 부드러운 페이드인 준비 */
 #viewer-nav-bar,
 #viewer-bottom-bar {
   opacity: 1;
@@ -137,7 +154,6 @@
   will-change: opacity, transform;
 }
 
-/* 젠 모드 활성화 시 — 페이드아웃 */
 body.zen-mode-active #viewer-nav-bar,
 body.zen-mode-active #viewer-bottom-bar,
 #screen-viewer.zen-mode-active #viewer-nav-bar,
@@ -147,7 +163,6 @@ body.zen-mode-active #viewer-bottom-bar,
   transition: opacity var(--fx-zen-fade-out) ease var(--fx-zen-idle-delay);
 }
 
-/* 젠 모드 해제 시 — 즉시 페이드인 */
 body:not(.zen-mode-active) #viewer-nav-bar,
 body:not(.zen-mode-active) #viewer-bottom-bar,
 #screen-viewer:not(.zen-mode-active) #viewer-nav-bar,
@@ -157,30 +172,22 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   transition: opacity var(--fx-zen-fade-in) ease;
 }
 
-/* nav-hidden / bottom-hidden 기존 클래스와의 협력 — z-layer 우선 */
-#viewer-nav-bar.nav-hidden {
-  transform: translateY(-100%);
-}
-#viewer-bottom-bar.bottom-hidden {
-  transform: translateY(100%);
-}
+#viewer-nav-bar.nav-hidden    { transform: translateY(-100%); }
+#viewer-bottom-bar.bottom-hidden { transform: translateY(100%); }
 
 /* ══════════════════════════════════════════════════════════════════
-   §4. 미니멀 HUD 스크러버 — 2px 기본 / 호버 확장 + 챕터 툴팁
+   §4. 미니멀 HUD 스크러버 — 2px 기본 / 호버 확장
    ══════════════════════════════════════════════════════════════════ */
-
-/* 스크러버 래퍼 */
 #slider-scrubber,
 .slider-scrubber {
   position: relative;
   display: flex;
   align-items: center;
-  height: 18px;          /* 터치 영역 확보 */
+  height: 18px;
   cursor: pointer;
   padding: 0 4px;
 }
 
-/* 기본 track — 2px 선 형태 */
 #progress-range-slider {
   -webkit-appearance: none;
   appearance: none;
@@ -191,15 +198,14 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
     to right,
     var(--color-accent, #c8864a) 0%,
     var(--color-accent, #c8864a) calc(var(--progress, 0) * 1%),
-    rgba(120,100,80,0.22)      calc(var(--progress, 0) * 1%),
-    rgba(120,100,80,0.22)      100%
+    rgba(120,100,80,0.22)        calc(var(--progress, 0) * 1%),
+    rgba(120,100,80,0.22)        100%
   );
   outline: none;
   cursor: pointer;
   transition: var(--fx-scrubber-transition);
 }
 
-/* 호버 시 track 확장 */
 #slider-scrubber:hover #progress-range-slider,
 .slider-scrubber:hover #progress-range-slider,
 #progress-range-slider:hover,
@@ -207,24 +213,19 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   height: var(--fx-scrubber-h-hover);
 }
 
-/* 썸(thumb) 스타일 */
 #progress-range-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 14px; height: 14px;
   border-radius: 50%;
   background: var(--color-accent, #c8864a);
   box-shadow: 0 1px 4px rgba(0,0,0,0.22);
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--fx-anim-fast) ease,
-              transform var(--fx-anim-fast) ease;
+  transition: opacity var(--fx-anim-fast) ease, transform var(--fx-anim-fast) ease;
 }
 #progress-range-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border: none;
-  border-radius: 50%;
+  width: 14px; height: 14px;
+  border: none; border-radius: 50%;
   background: var(--color-accent, #c8864a);
   box-shadow: 0 1px 4px rgba(0,0,0,0.22);
   cursor: pointer;
@@ -232,7 +233,6 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   transition: opacity var(--fx-anim-fast) ease;
 }
 
-/* 호버/포커스 시 thumb 노출 */
 #slider-scrubber:hover #progress-range-slider::-webkit-slider-thumb,
 #progress-range-slider:hover::-webkit-slider-thumb,
 #progress-range-slider:focus-visible::-webkit-slider-thumb {
@@ -244,7 +244,6 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   opacity: 1;
 }
 
-/* 챕터 툴팁 */
 #slider-tooltip {
   position: fixed;
   bottom: 56px;
@@ -268,17 +267,15 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
 #slider-tooltip::after {
   content: '';
   position: absolute;
-  bottom: -5px;
-  left: 50%;
+  bottom: -5px; left: 50%;
   transform: translateX(-50%);
-  width: 8px;
-  height: 5px;
+  width: 8px; height: 5px;
   background: inherit;
   clip-path: polygon(0 0, 100% 0, 50% 100%);
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §5. 플로팅 TOC / 검색 사이드바 오버레이
+   §5. 플로팅 TOC / 검색 사이드바
    ══════════════════════════════════════════════════════════════════ */
 #toc-sidebar {
   border-radius: var(--fx-sidebar-radius);
@@ -295,7 +292,6 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   box-shadow: var(--fx-sidebar-shadow), 0 0 0 1px rgba(0,0,0,0.04);
 }
 
-/* 설정 패널 플로팅화 */
 #settings-panel {
   border-radius: var(--fx-sidebar-radius) var(--fx-sidebar-radius) 0 0;
   box-shadow: 0 -16px 48px rgba(0,0,0,0.18), 0 -2px 8px rgba(0,0,0,0.08);
@@ -310,7 +306,6 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   opacity: 1;
 }
 
-/* 검색 모달 플로팅 */
 #search-modal,
 #fts-modal,
 #stats-modal {
@@ -322,10 +317,6 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
 
 /* ══════════════════════════════════════════════════════════════════
    §6. Drop Cap — 문단 첫 글자 대형 장식
-   ─────────────────────────────────────────────────────────────────
-   epub.js iframe 내에 직접 적용하려면 reapplyInlineTheme()으로
-   .fable-dropcap 클래스를 주입해야 합니다.
-   서재/뷰어 외부 콘텐츠 영역에도 적용 가능합니다.
    ══════════════════════════════════════════════════════════════════ */
 .fable-dropcap p:first-of-type::first-letter,
 .epub-dropcap::first-letter {
@@ -340,7 +331,7 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §7. 스켈레톤 로딩 UI
+   §7. 스켈레톤 로딩 UI (기존)
    ══════════════════════════════════════════════════════════════════ */
 .skeleton {
   position: relative;
@@ -352,31 +343,16 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(255,255,255,0.55) 50%,
-    transparent 100%
-  );
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.55) 50%, transparent 100%);
   background-size: 200% 100%;
   animation: fx-skeleton-shimmer 1.5s ease-in-out infinite;
 }
-.skeleton-card {
-  width: 100%;
-  height: 180px;
-  border-radius: 12px;
-  margin-bottom: 12px;
-}
-.skeleton-line {
-  height: 14px;
-  border-radius: 4px;
-  margin-bottom: 8px;
-}
-.skeleton-line.short { width: 60%; }
+.skeleton-card  { width: 100%; height: 180px; border-radius: 12px; margin-bottom: 12px; }
+.skeleton-line  { height: 14px; border-radius: 4px; margin-bottom: 8px; }
+.skeleton-line.short  { width: 60%; }
 .skeleton-line.medium { width: 80%; }
-.skeleton-line.long  { width: 95%; }
+.skeleton-line.long   { width: 95%; }
 
-/* 라이브러리 그리드 스켈레톤 */
 .library-grid-skeleton {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -385,10 +361,8 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §8. 하이라이터 텍스처 효과 — SVG/CSS 마스킹
+   §8. 하이라이터 텍스처 — SVG/CSS 마스킹
    ══════════════════════════════════════════════════════════════════ */
-
-/* 형광펜 스타일 하이라이트 */
 .annotation-highlight,
 [data-annotation-type="highlight"] {
   position: relative;
@@ -396,7 +370,6 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   mix-blend-mode: multiply;
 }
 
-/* 기본 노란 형광 */
 .annotation-highlight,
 [data-annotation-color="yellow"] {
   background: linear-gradient(
@@ -408,45 +381,29 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
     rgba(255,220,80,0.72) 96%,
     rgba(0,0,0,0) 98%
   );
-  /* SVG 마스킹 텍스처 — 손그림 질감 */
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='30'%3E%3Cfilter id='r'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.04' numOctaves='4' stitchTiles='stitch'/%3E%3CfeDisplacementMap in='SourceGraphic' scale='2'/%3E%3C/filter%3E%3Crect width='200' height='30' filter='url(%23r)' fill='white'/%3E%3C/svg%3E");
   -webkit-mask-size: 200px 30px;
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='30'%3E%3Cfilter id='r'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.04' numOctaves='4' stitchTiles='stitch'/%3E%3CfeDisplacementMap in='SourceGraphic' scale='2'/%3E%3C/filter%3E%3Crect width='200' height='30' filter='url(%23r)' fill='white'/%3E%3C/svg%3E");
   mask-size: 200px 30px;
 }
 
-/* 파란 하이라이트 변형 */
 [data-annotation-color="blue"] {
-  background: linear-gradient(
-    104deg,
-    rgba(0,0,0,0) 0.9%,
-    rgba(100,180,255,0.68) 2.4%,
-    rgba(120,190,255,0.62) 67%,
-    rgba(0,0,0,0) 98%
-  );
+  background: linear-gradient(104deg, rgba(0,0,0,0) 0.9%, rgba(100,180,255,0.68) 2.4%, rgba(120,190,255,0.62) 67%, rgba(0,0,0,0) 98%);
   mix-blend-mode: multiply;
 }
 
-/* 초록 하이라이트 변형 */
 [data-annotation-color="green"] {
-  background: linear-gradient(
-    104deg,
-    rgba(0,0,0,0) 0.9%,
-    rgba(100,220,140,0.68) 2.4%,
-    rgba(120,230,160,0.62) 67%,
-    rgba(0,0,0,0) 98%
-  );
+  background: linear-gradient(104deg, rgba(0,0,0,0) 0.9%, rgba(100,220,140,0.68) 2.4%, rgba(120,230,160,0.62) 67%, rgba(0,0,0,0) 98%);
   mix-blend-mode: multiply;
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §9. 포모도로 원형 프로그레스 링 위젯
+   §9. 포모도로 원형 프로그레스 링
    ══════════════════════════════════════════════════════════════════ */
 #pomodoro-popup,
 .pomodoro-widget {
   position: fixed;
-  bottom: 80px;
-  right: 20px;
+  bottom: 80px; right: 20px;
   z-index: 8000;
   background: var(--fx-glass-bg-light);
   backdrop-filter: blur(14px) saturate(180%);
@@ -461,85 +418,51 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   gap: 10px;
   min-width: 160px;
   animation: fx-popup-in var(--fx-anim-normal) cubic-bezier(0.34,1.56,0.64,1) both;
-  transition: opacity var(--fx-anim-fast) ease,
-              transform var(--fx-anim-fast) ease;
+  transition: opacity var(--fx-anim-fast) ease, transform var(--fx-anim-fast) ease;
 }
 #pomodoro-popup[hidden],
-.pomodoro-widget[hidden] {
-  display: none !important;
-}
+.pomodoro-widget[hidden] { display: none !important; }
 
-/* SVG 링 컨테이너 */
 .pomodoro-ring-wrap {
   position: relative;
   width: var(--fx-pomodoro-size);
   height: var(--fx-pomodoro-size);
 }
-.pomodoro-ring-svg {
-  width: 100%;
-  height: 100%;
-  transform: rotate(-90deg);
-}
-.pomodoro-ring-track {
-  fill: none;
-  stroke: var(--fx-pomodoro-track);
-  stroke-width: var(--fx-pomodoro-stroke);
-}
+.pomodoro-ring-svg     { width: 100%; height: 100%; transform: rotate(-90deg); }
+.pomodoro-ring-track   { fill: none; stroke: var(--fx-pomodoro-track); stroke-width: var(--fx-pomodoro-stroke); }
 .pomodoro-ring-progress {
   fill: none;
   stroke: var(--fx-pomodoro-color);
   stroke-width: var(--fx-pomodoro-stroke);
   stroke-linecap: round;
-  stroke-dasharray: 314.16;     /* 2π × r(50) */
-  stroke-dashoffset: 314.16;    /* JS에서 업데이트: 314.16 × (1 - ratio) */
-  transition: stroke-dashoffset 0.8s cubic-bezier(0.4,0,0.2,1),
-              stroke 0.4s ease;
+  stroke-dasharray: 314.16;
+  stroke-dashoffset: 314.16;
+  transition: stroke-dashoffset 0.8s cubic-bezier(0.4,0,0.2,1), stroke 0.4s ease;
 }
-/* 뽀모도로 마지막 1분 — 빨간색 경고 */
-.pomodoro-ring-progress.warning {
-  stroke: #e74c3c;
-  animation: fx-ring-pulse 0.6s ease-in-out infinite alternate;
-}
+.pomodoro-ring-progress.warning { stroke: #e74c3c; animation: fx-ring-pulse 0.6s ease-in-out infinite alternate; }
 
-/* 중앙 시간 표시 */
 .pomodoro-time-label {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  font-weight: 700;
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--color-ink, #1a1814);
   letter-spacing: -0.5px;
 }
 .pomodoro-phase-label {
-  font-size: 11px;
-  color: var(--color-ink-muted, #7a6a5a);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  margin-top: -4px;
+  font-size: 11px; color: var(--color-ink-muted, #7a6a5a);
+  letter-spacing: 0.5px; text-transform: uppercase; margin-top: -4px;
 }
-.pomodoro-controls {
-  display: flex;
-  gap: 8px;
-}
+.pomodoro-controls { display: flex; gap: 8px; }
 .pomodoro-btn {
   background: rgba(120,100,80,0.10);
   border: 1px solid rgba(120,100,80,0.16);
-  border-radius: 10px;
-  padding: 6px 14px;
-  font-size: 12px;
-  cursor: pointer;
+  border-radius: 10px; padding: 6px 14px;
+  font-size: 12px; cursor: pointer;
   color: var(--color-ink, #1a1814);
-  transition: background var(--fx-anim-fast) ease,
-              transform  var(--fx-anim-fast) ease;
+  transition: background var(--fx-anim-fast) ease, transform var(--fx-anim-fast) ease;
 }
-.pomodoro-btn:hover {
-  background: rgba(120,100,80,0.18);
-  transform: scale(1.04);
-}
+.pomodoro-btn:hover  { background: rgba(120,100,80,0.18); transform: scale(1.04); }
 .pomodoro-btn:active { transform: scale(0.97); }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -550,7 +473,6 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   filter: brightness(0.82) contrast(1.06);
   transition: filter var(--fx-anim-normal) ease;
 }
-/* 다크모드에서 이미지에 마우스 올리면 원본 밝기로 복원 */
 [data-theme="dark"] #viewer-viewport img:hover,
 [data-theme="dark"] .epub-container img:hover {
   filter: brightness(1) contrast(1);
@@ -558,12 +480,7 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
 
 /* ══════════════════════════════════════════════════════════════════
    §11. FX 비활성화 오버라이드 — data-fx-* 어트리뷰트 가드
-   ─────────────────────────────────────────────────────────────────
-   [html] 또는 [body] 에 data-fx-anim="off", data-fx-blur="off",
-   data-fx-zen="off" 가 설정되면 해당 FX를 전역 비활성화합니다.
    ══════════════════════════════════════════════════════════════════ */
-
-/* ── A. 애니메이션 전체 비활성화 ── */
 html[data-fx-anim="off"] *,
 html[data-fx-anim="off"] *::before,
 html[data-fx-anim="off"] *::after {
@@ -574,7 +491,6 @@ html[data-fx-anim="off"] *::after {
   scroll-behavior:           auto   !important;
 }
 
-/* ── B. 글래스모피즘 / 백드롭 블러 비활성화 ── */
 html[data-fx-blur="off"] .viewer-nav-bar,
 html[data-fx-blur="off"] #viewer-nav-bar,
 html[data-fx-blur="off"] .viewer-bottom-bar,
@@ -587,14 +503,15 @@ html[data-fx-blur="off"] #fts-modal,
 html[data-fx-blur="off"] #stats-modal,
 html[data-fx-blur="off"] #pomodoro-popup,
 html[data-fx-blur="off"] .pomodoro-widget,
-html[data-fx-blur="off"] #slider-tooltip {
+html[data-fx-blur="off"] #slider-tooltip,
+html[data-fx-blur="off"] .tag-context-popup,
+html[data-fx-blur="off"] .card-menu-popup {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   background: var(--color-bg, #f4f1ea) !important;
   border-color: rgba(0,0,0,0.10) !important;
 }
 
-/* 다크 테마 폴백 */
 [data-theme="dark"] html[data-fx-blur="off"] .viewer-nav-bar,
 [data-theme="dark"] html[data-fx-blur="off"] #viewer-nav-bar,
 [data-theme="dark"] html[data-fx-blur="off"] .viewer-bottom-bar,
@@ -602,7 +519,6 @@ html[data-fx-blur="off"] #slider-tooltip {
   background: #1a1816 !important;
 }
 
-/* ── C. 젠 모드 비활성화 — 항시 바 노출 강제 ── */
 html[data-fx-zen="off"] body.zen-mode-active #viewer-nav-bar,
 html[data-fx-zen="off"] body.zen-mode-active #viewer-bottom-bar,
 html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-nav-bar,
@@ -615,13 +531,10 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 /* ══════════════════════════════════════════════════════════════════
    §12. 페이지 전환 효과
    ══════════════════════════════════════════════════════════════════ */
-
-/* Fade */
 .page-transition-fade .epubjs-view {
   animation: fx-page-fade var(--fx-anim-normal) ease both;
 }
 
-/* Slide */
 .page-transition-slide .epubjs-view--next {
   animation: fx-page-slide-in  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1) both;
 }
@@ -629,7 +542,6 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
   animation: fx-page-slide-out var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1) both;
 }
 
-/* Flip 3D */
 .page-transition-flip3d .epubjs-view {
   animation: fx-page-flip var(--fx-anim-slow) cubic-bezier(0.4,0,0.2,1) both;
   transform-origin: left center;
@@ -638,7 +550,7 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §13. 키프레임 라이브러리
+   §13. 키프레임 라이브러리 (기존)
    ══════════════════════════════════════════════════════════════════ */
 @keyframes fx-skeleton-shimmer {
   0%   { background-position: -200% 0; }
@@ -646,14 +558,8 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 }
 
 @keyframes fx-popup-in {
-  from {
-    opacity: 0;
-    transform: translateY(12px) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)    scale(1);    }
 }
 
 @keyframes fx-ring-pulse {
@@ -687,21 +593,467 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   §14. 반응형 미디어 쿼리 — 모바일 최적화
+   §14. [v5.0] 세피아 그라디언트 스켈레톤 웨이브
+   ─────────────────────────────────────────────────────────────────
+   단순 페이드가 아닌 세피아→앰버 펄스 웨이브로 업그레이드.
+   uploader.js의 SkeletonUI는 인라인 CSS로도 이를 정의하지만,
+   이 파일에서도 전역 .skel-cover / .skel-line 클래스를 재정의하여
+   스타일 충돌 없이 일관성을 보장한다.
+   ══════════════════════════════════════════════════════════════════ */
+@keyframes fx-sepia-wave {
+  0%   { background-position: -800px 0; }
+  100% { background-position:  800px 0; }
+}
+
+.skel-cover,
+.book-card .skel-cover {
+  background: linear-gradient(
+    105deg,
+    var(--fx-skel-sepia-1, #ede4d4)  0%,
+    var(--fx-skel-sepia-2, #d8ccb8) 20%,
+    var(--fx-skel-warm,    #f0e8d4) 40%,
+    var(--fx-skel-amber,   #e2c48a) 60%,
+    var(--fx-skel-sepia-2, #d8ccb8) 80%,
+    var(--fx-skel-sepia-1, #ede4d4) 100%
+  ) !important;
+  background-size: 1600px 100% !important;
+  animation: fx-sepia-wave 2.2s cubic-bezier(0.4,0,0.6,1) infinite !important;
+}
+
+[data-theme="dark"] .skel-cover,
+[data-theme="dark"] .book-card .skel-cover {
+  background: linear-gradient(
+    105deg,
+    #292218 0%, #362c20 20%, #2a2218 40%, #3e3020 60%, #362c20 80%, #292218 100%
+  ) !important;
+  background-size: 1600px 100% !important;
+}
+
+.skel-line,
+.book-card .skel-line {
+  background: linear-gradient(
+    105deg,
+    var(--fx-skel-sepia-1, #ede4d4)  0%,
+    var(--fx-skel-warm,    #f0e8d4) 40%,
+    var(--fx-skel-amber,   #e2c48a) 60%,
+    var(--fx-skel-sepia-1, #ede4d4) 100%
+  ) !important;
+  background-size: 1600px 100% !important;
+  animation: fx-sepia-wave 2.2s cubic-bezier(0.4,0,0.6,1) infinite 0.15s !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §15. [v5.0] 서재 최근 읽은 책 '이어읽기' 플로팅 카드 슬라이드인
+   ══════════════════════════════════════════════════════════════════ */
+@keyframes fx-recent-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.recent-card {
+  transition: transform 0.22s cubic-bezier(0.4,0,0.2,1),
+              box-shadow 0.22s ease;
+}
+
+.recent-card--slide-in {
+  animation: fx-recent-slide-in 0.40s cubic-bezier(0.34,1.32,0.64,1) both;
+}
+
+.recent-card:hover {
+  transform: translateY(-4px) scale(1.01);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.12);
+}
+
+/* [이어서 몰입하기] 버튼 */
+.recent-resume-btn {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 6px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1.5px solid var(--color-accent, #c8864a);
+  background: transparent;
+  color: var(--color-accent, #c8864a);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.15s ease;
+}
+.recent-resume-btn:hover {
+  background: var(--color-accent, #c8864a);
+  color: #fff;
+  transform: scale(1.04);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §16. [v5.0] 태그 필터 Flip CSS Grid 트랜지션
+   ─────────────────────────────────────────────────────────────────
+   필터링으로 카드가 재배치될 때 딱딱하게 끊기지 않고
+   부드럽게 자리를 찾아 이동하는 Flip 애니메이션
+   ══════════════════════════════════════════════════════════════════ */
+@keyframes fx-card-flip-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.90) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes fx-card-flip-exit {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.88) translateY(-8px);
+  }
+}
+
+.book-card--flip-enter {
+  animation: fx-card-flip-enter 0.30s cubic-bezier(0.34,1.2,0.64,1) both;
+}
+
+.book-card--flip-exit {
+  animation: fx-card-flip-exit 0.22s ease-in both;
+  pointer-events: none;
+}
+
+/* 그리드 내 카드 공통 전환 */
+#library-grid .book-card {
+  transition: transform 0.22s cubic-bezier(0.4,0,0.2,1),
+              box-shadow 0.22s ease,
+              opacity    0.20s ease;
+  will-change: transform, opacity;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §17. [v5.0] 목표 달성 앰버 파티클 세레머니
+   ══════════════════════════════════════════════════════════════════ */
+@keyframes fx-particle-burst {
+  0% {
+    opacity: 1;
+    transform: translateY(0) translateX(0) scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: translateY(-22px) translateX(var(--tx, 0px)) scale(1.3);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-52px) translateX(var(--tx, 0px)) scale(0.3);
+  }
+}
+
+.goal-particle {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--fx-particle-color, #c8864a);
+  pointer-events: none;
+  animation: fx-particle-burst var(--dur, 0.8s) cubic-bezier(0.22,0.61,0.36,1) both;
+  box-shadow: 0 0 6px rgba(200,134,74,0.5);
+  z-index: 10;
+}
+
+/* 목표 달성 카드 글로우 */
+.dash-card--goal.goal-achieved {
+  animation: fx-goal-glow 1.2s ease-out both;
+}
+
+@keyframes fx-goal-glow {
+  0%   { box-shadow: 0 0 0 0 rgba(200,134,74,0.5); }
+  40%  { box-shadow: 0 0 0 12px rgba(200,134,74,0.22); }
+  100% { box-shadow: 0 0 0 0 rgba(200,134,74,0); }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §18. [v5.0] 스마트 태그 폴더 그리드
+   ══════════════════════════════════════════════════════════════════ */
+.smart-tag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 10px;
+  padding: 4px 0 12px;
+}
+
+.smart-tag-folder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 14px 8px 10px;
+  border-radius: var(--fx-tag-folder-radius, 14px);
+  border: 1.5px solid rgba(120,100,80,0.12);
+  background: rgba(250,246,240,0.7);
+  cursor: pointer;
+  transition: transform 0.20s cubic-bezier(0.34,1.3,0.64,1),
+              box-shadow 0.20s ease,
+              border-color 0.20s ease,
+              background 0.20s ease;
+  position: relative;
+  user-select: none;
+  will-change: transform;
+}
+
+[data-theme="dark"] .smart-tag-folder {
+  background: rgba(32,26,20,0.62);
+  border-color: rgba(120,90,60,0.18);
+}
+
+.smart-tag-folder:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--fx-tag-folder-shadow, 0 4px 16px rgba(0,0,0,0.08));
+}
+
+.smart-tag-folder:active {
+  transform: translateY(-1px) scale(0.98);
+}
+
+.smart-tag-folder.active {
+  border-color: var(--tag-color, #c8864a);
+  background: var(--tag-bg, rgba(200,134,74,0.08));
+  box-shadow: 0 4px 16px rgba(0,0,0,0.10);
+}
+
+.smart-tag-folder.drop-target {
+  transform: scale(1.07);
+  box-shadow: 0 0 0 2.5px var(--tag-color, #c8864a), 0 8px 24px rgba(0,0,0,0.12);
+  transition: none;
+}
+
+.smart-tag-icon  { font-size: 22px; line-height: 1; transition: transform 0.18s ease; }
+.smart-tag-folder:hover .smart-tag-icon { transform: scale(1.15); }
+.smart-tag-name  { font-size: 11.5px; font-weight: 600; text-align: center; line-height: 1.2; }
+.smart-tag-count {
+  font-size: 10px;
+  color: var(--color-ink-muted, #8a7a6a);
+  background: rgba(120,100,80,0.08);
+  border-radius: 10px;
+  padding: 1px 7px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §19. [v5.0] 태그 컨텍스트 글래스모피즘 팝오버
+   ══════════════════════════════════════════════════════════════════ */
+.tag-context-popup {
+  position: fixed;
+  z-index: 9900;
+  background: rgba(250,246,240,0.88);
+  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
+  border: 1px solid rgba(200,170,130,0.28);
+  border-radius: 14px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.16),
+              0 2px 8px rgba(0,0,0,0.08),
+              0 0 0 0.5px rgba(200,170,130,0.20);
+  padding: 10px;
+  min-width: 200px;
+  max-width: 280px;
+  animation: fx-popup-in 0.24s cubic-bezier(0.34,1.4,0.64,1) both;
+}
+
+[data-theme="dark"] .tag-context-popup {
+  background: rgba(32,26,20,0.90);
+  border-color: rgba(120,90,60,0.28);
+}
+
+.tag-context-popup-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-ink-muted, #8a7a6a);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 6px 8px;
+  border-bottom: 1px solid rgba(120,100,80,0.10);
+  margin-bottom: 6px;
+}
+
+.tag-context-popup-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 2px;
+}
+
+.tag-context-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 20px;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: transform 0.16s cubic-bezier(0.34,1.3,0.64,1),
+              opacity   0.15s ease,
+              box-shadow 0.15s ease;
+}
+
+.tag-context-btn:hover {
+  transform: scale(1.08);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+
+.tag-context-btn:active { transform: scale(0.96); }
+
+.tag-context-btn.active {
+  box-shadow: 0 2px 6px rgba(0,0,0,0.18), inset 0 1px 2px rgba(255,255,255,0.20);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §20. [v5.0] 컴팩트 리스트 뷰
+   ══════════════════════════════════════════════════════════════════ */
+.library-grid--list {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 0 !important;
+}
+
+.library-grid--list .book-card {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid rgba(120,100,80,0.08);
+  border-radius: 0;
+  transition: background 0.15s ease;
+}
+
+.library-grid--list .book-card:hover {
+  background: rgba(120,100,80,0.04);
+}
+
+.library-grid--list .book-card-progress { display: none; }
+
+/* 리스트뷰 썸네일 */
+.library-grid--list .book-cover-wrap {
+  width: 44px !important;
+  height: 62px !important;
+  flex-shrink: 0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §21. [v5.0] Dashboard HUD 영역
+   ══════════════════════════════════════════════════════════════════ */
+#dashboard-hud {
+  padding: 16px 0 10px;
+  transition: opacity 0.24s ease, max-height 0.28s cubic-bezier(0.4,0,0.2,1);
+  overflow: hidden;
+}
+
+#dashboard-hud.hud-hidden {
+  display: none !important;
+}
+
+/* HUD 카드 입장 애니메이션 */
+.dash-card {
+  animation: fx-popup-in 0.32s cubic-bezier(0.34,1.2,0.64,1) both;
+}
+
+.dash-card:nth-child(2) { animation-delay: 0.06s; }
+.dash-card:nth-child(3) { animation-delay: 0.12s; }
+
+/* ══════════════════════════════════════════════════════════════════
+   §22. [v5.0] 모바일 임포트 버튼
+   ══════════════════════════════════════════════════════════════════ */
+.mobile-import-btn {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 22px;
+  border: 1.5px dashed rgba(120,100,80,0.30);
+  background: rgba(120,100,80,0.05);
+  color: var(--color-ink-muted, #8a7a6a);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+}
+
+.mobile-import-btn:hover {
+  border-color: var(--color-accent, #c8864a);
+  background: rgba(200,134,74,0.08);
+  color: var(--color-accent, #c8864a);
+}
+
+/* 터치 디바이스(모바일)에서만 표시 */
+@media (hover: none) and (pointer: coarse) {
+  .mobile-import-btn { display: inline-flex; }
+}
+
+/* 컴팩트 뷰 전환 버튼 */
+.library-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid rgba(120,100,80,0.18);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-ink-muted, #8a7a6a);
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+  white-space: nowrap;
+}
+
+.library-view-toggle:hover,
+.library-view-toggle.active {
+  background: rgba(120,100,80,0.09);
+  color: var(--color-ink, #1a1814);
+  border-color: rgba(120,100,80,0.28);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §23. 반응형 미디어 쿼리
    ══════════════════════════════════════════════════════════════════ */
 @media (max-width: 600px) {
   :root {
     --fx-pomodoro-size: 96px;
     --fx-sidebar-radius: 16px;
+    --fx-tag-folder-radius: 12px;
   }
+
   #pomodoro-popup,
   .pomodoro-widget {
-    bottom: 70px;
-    right: 12px;
+    bottom: 70px; right: 12px;
     padding: 14px 16px;
   }
-  .pomodoro-time-label {
-    font-size: 18px;
+
+  .pomodoro-time-label { font-size: 18px; }
+
+  .smart-tag-grid {
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+    gap: 8px;
+  }
+
+  .smart-tag-icon { font-size: 18px; }
+  .smart-tag-name { font-size: 10.5px; }
+
+  .recent-card--slide-in {
+    animation-duration: 0.32s;
+  }
+
+  #dashboard-hud {
+    padding: 12px 0 8px;
+  }
+}
+
+@media (max-width: 380px) {
+  .smart-tag-grid {
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
@@ -714,7 +1066,15 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
     animation-iteration-count: 1      !important;
     transition-duration:       0.01ms !important;
   }
-  .skeleton::after {
+
+  .skeleton::after,
+  .skel-cover,
+  .skel-line {
     animation: none !important;
+    background: rgba(120,100,80,0.10) !important;
   }
+
+  .recent-card--slide-in { animation: none !important; }
+  .book-card--flip-enter { animation: none !important; }
+  .goal-particle         { animation: none !important; display: none !important; }
 }

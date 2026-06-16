@@ -3,20 +3,19 @@
  * ───────────────────────────────────────────────────────────────────
  * 공용 설정 UI (서재/뷰어 양쪽에서 사용)
  *
- * 변경 사항 (v5.0):
- *   - [FX] initFxSettingsUI(): 비주얼 특수효과 제어 섹션 신설
- *     A) fxAnimation  토글 — 애니메이션 및 페이지 전환 효과
- *     B) fxBlur       토글 — 글래스모피즘 및 백드롭 블러
- *     C) fxZenMode    토글 — 몰입형 젠 모드 자동 UI 숨김
- *   - _saveStateToLS / _loadStateFromLS FX 상태 항목 확장
- *   - applyFxState(): html data-fx-* 어트리뷰트 선언적 바인딩
+ * v5.0 대개혁 신규 사항:
+ *   [❸-태그관리] 태그 관리 섹션 신설
+ *     A) 커스텀 태그 생성기 (<input> + [태그 생성] 버튼)
+ *     B) store.tags 배열 push → 3-Way 리액티브 바인딩
+ *     C) 장르 태그 칩 미리보기 (GENRE_TAGS 컬러 브랜딩)
+ *   [❶-HUD스위치] showDashboardReport 토글 스위치 렌더링 세그먼트
+ *     → store.showDashboardReport 리액티브 연동
+ *   [v5.0 FX] initFxSettingsUI(): 비주얼 특수효과 제어 섹션 (유지)
  *
  * 변경 사항 (v4.0 — 유지):
- *   - fontWeightBoost 슬라이더 바인딩
- *   - contrastScale 슬라이더 바인딩
- *   - eyeProtectMinutes 입력 바인딩
- *   - pageTransition 라디오/버튼 바인딩
- *   - STATE_KEY 저장 항목 확장
+ *   - fontWeightBoost / contrastScale / eyeProtectMinutes / pageTransition
+ *   - _saveStateToLS / _loadStateFromLS (v5.0 항목 확장)
+ *   - applyFxState(): html data-fx-* 어트리뷰트 선언적 바인딩
  * ───────────────────────────────────────────────────────────────────
  */
 
@@ -27,6 +26,7 @@ import {
 } from '../store.js';
 import { AnnotationSyncEngine } from '../sync.js';
 import { injectCustomToIframe, reapplyInlineTheme, waitForFontsWithTimeout } from '../reader.js';
+import { GENRE_TAGS } from './uploader.js';
 
 /* ══════════════════════════════════════════════════════════════════
    §30. 폰트 업로더
@@ -49,17 +49,15 @@ function initFontUploader() {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   [2]-2 오프라인 폰트 동적 로딩 (Font Lazy Loading)
-   서체 선택 시점에만 @font-face / Google Fonts를 비동기 인젝션
-   [v4.0] waitForFontsWithTimeout 1.5s 가드 통합
+   §31. 폰트 지연 로딩 (Font Lazy Loading)
    ══════════════════════════════════════════════════════════════════ */
 const FontLazyLoader = (() => {
   const loaded = new Set();
   const FONTS = {
-    'gowun':  { label: '고운바탕', family: "'Gowun Batang', serif",        href: 'https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&display=swap' },
-    'noto':   { label: '본명조',   family: "'Noto Serif KR', serif",        href: 'https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;700&display=swap' },
-    'sans':   { label: '본고딕',   family: "'Noto Sans KR', sans-serif",    href: 'https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700&display=swap' },
-    'nanum':  { label: '나눔명조', family: "'Nanum Myeongjo', serif",       href: 'https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700&display=swap' },
+    'gowun':  { label: '고운바탕', family: "'Gowun Batang', serif",         href: 'https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&display=swap' },
+    'noto':   { label: '본명조',   family: "'Noto Serif KR', serif",         href: 'https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;700&display=swap' },
+    'sans':   { label: '본고딕',   family: "'Noto Sans KR', sans-serif",     href: 'https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700&display=swap' },
+    'nanum':  { label: '나눔명조', family: "'Nanum Myeongjo', serif",        href: 'https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700&display=swap' },
     'system': { label: '시스템',   family: 'system-ui, -apple-system, sans-serif', href: null },
   };
 
@@ -114,9 +112,8 @@ function initFontSelector() {
   sel.addEventListener('change', () => FontLazyLoader.apply(sel.value));
 }
 
-
 /* ══════════════════════════════════════════════════════════════════
-   §31. 커스텀 테마 빌더
+   §31-A. 커스텀 테마 빌더
    ══════════════════════════════════════════════════════════════════ */
 function initCustomThemeBuilder() {
   function syncColor(colorId, hexId, storeKey) {
@@ -142,9 +139,8 @@ function initCustomThemeBuilder() {
   }
 }
 
-
 /* ══════════════════════════════════════════════════════════════════
-   [v4.0] §31-A. 폰트 굵기 보정 슬라이더 (fontWeightBoost)
+   §31-B. 폰트 굵기 보정 슬라이더 (fontWeightBoost)
    ══════════════════════════════════════════════════════════════════ */
 function initFontWeightBoostSlider() {
   const slider  = DOMProxy.get('input-font-weight-boost');
@@ -163,15 +159,12 @@ function initFontWeightBoostSlider() {
   });
 
   ReactiveStore.subscribe('fontWeightBoost', (v) => {
-    if (slider.value !== String(v)) {
-      slider.value = String(v);
-      setTextSafe(display, String(v));
-    }
+    if (slider.value !== String(v)) { slider.value = String(v); setTextSafe(display, String(v)); }
   });
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   [v4.0] §31-B. 대비 스케일러 슬라이더 (contrastScale)
+   §31-C. 대비 스케일러 슬라이더 (contrastScale)
    ══════════════════════════════════════════════════════════════════ */
 function initContrastScaleSlider() {
   const slider  = DOMProxy.get('input-contrast-scale');
@@ -192,15 +185,12 @@ function initContrastScaleSlider() {
 
   ReactiveStore.subscribe('contrastScale', (v) => {
     const s = String(v);
-    if (slider.value !== s) {
-      slider.value = s;
-      setTextSafe(display, fmt(v));
-    }
+    if (slider.value !== s) { slider.value = s; setTextSafe(display, fmt(v)); }
   });
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   [v4.0] §31-C. 눈 보호 타이머 분 설정 (eyeProtectMinutes)
+   §31-D. 눈 보호 타이머 분 설정 (eyeProtectMinutes)
    ══════════════════════════════════════════════════════════════════ */
 function initEyeProtectMinutesInput() {
   const input   = DOMProxy.get('input-eye-protect-minutes');
@@ -220,15 +210,12 @@ function initEyeProtectMinutesInput() {
   });
 
   ReactiveStore.subscribe('eyeProtectMinutes', (v) => {
-    if (input.value !== String(v)) {
-      input.value = String(v);
-      setTextSafe(display, String(v) + '분');
-    }
+    if (input.value !== String(v)) { input.value = String(v); setTextSafe(display, String(v) + '분'); }
   });
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   [v4.0] §31-D. 페이지 전환 옵션 선택 UI (pageTransition)
+   §31-E. 페이지 전환 옵션 선택 UI (pageTransition)
    ══════════════════════════════════════════════════════════════════ */
 function initPageTransitionSelector() {
   const radios = document.querySelectorAll('input[name="page-transition"]');
@@ -236,13 +223,9 @@ function initPageTransitionSelector() {
     const cur = store.pageTransition || 'fade';
     radios.forEach(r => { r.checked = (r.value === cur); });
     radios.forEach(r => {
-      r.addEventListener('change', () => {
-        if (r.checked) { store.pageTransition = r.value; _saveStateToLS(); }
-      });
+      r.addEventListener('change', () => { if (r.checked) { store.pageTransition = r.value; _saveStateToLS(); } });
     });
-    ReactiveStore.subscribe('pageTransition', (v) => {
-      radios.forEach(r => { r.checked = (r.value === v); });
-    });
+    ReactiveStore.subscribe('pageTransition', (v) => { radios.forEach(r => { r.checked = (r.value === v); }); });
     return;
   }
 
@@ -257,24 +240,17 @@ function initPageTransitionSelector() {
       b.addEventListener('click', () => {
         store.pageTransition = b.dataset.transition;
         _saveStateToLS();
-        btns.forEach(x => {
-          x.classList.toggle('active', x === b);
-          x.setAttribute('aria-checked', String(x === b));
-        });
+        btns.forEach(x => { x.classList.toggle('active', x === b); x.setAttribute('aria-checked', String(x === b)); });
       });
     });
     ReactiveStore.subscribe('pageTransition', (v) => {
-      btns.forEach(b => {
-        b.classList.toggle('active', b.dataset.transition === v);
-        b.setAttribute('aria-checked', String(b.dataset.transition === v));
-      });
+      btns.forEach(b => { b.classList.toggle('active', b.dataset.transition === v); b.setAttribute('aria-checked', String(b.dataset.transition === v)); });
     });
   }
 }
 
-
 /* ══════════════════════════════════════════════════════════════════
-   §32~33. 키보드 힌트 / 오프라인 배너
+   §32. 키보드 힌트 / 오프라인 배너
    ══════════════════════════════════════════════════════════════════ */
 function showKeyboardHint() {
   if (localStorage.getItem('fable_keyboard_hint_shown')) return;
@@ -289,35 +265,39 @@ function initOfflineBanner() {
       if (DOMProxy.exists(id)) DOMProxy.get(id).style.display = offline ? 'flex' : 'none';
     });
   }
-  window.addEventListener('offline', () => { update(true);  Toast.show('인터넷 연결이 끊겼습니다. 오프라인 모드로 작동 중입니다.'); });
-  window.addEventListener('online',  async () => { update(false); Toast.show('인터넷 연결이 복원되었습니다.', 'success'); await AnnotationSyncEngine.syncPending(); });
+  window.addEventListener('offline', () => { update(true); Toast.show('인터넷 연결이 끊겼습니다. 오프라인 모드로 작동 중입니다.'); });
+  window.addEventListener('online', async () => { update(false); Toast.show('인터넷 연결이 복원되었습니다.', 'success'); await AnnotationSyncEngine.syncPending(); });
   if (!navigator.onLine) update(true);
 }
 
-
 /* ══════════════════════════════════════════════════════════════════
-   §35. 설정 저장 / 복원 — [v5.0] FX 항목 추가
+   §33. 설정 저장 / 복원 — v5.0 항목 확장
    ══════════════════════════════════════════════════════════════════ */
 function _saveStateToLS() {
   const snap = {
-    fontSize:          store.fontSize,
-    lineHeight:        store.lineHeight,
-    theme:             store.theme,
-    flow:              store.flow,
-    userBg:            store.userBg,
-    userInk:           store.userInk,
-    userSpacing:       store.userSpacing,
-    userLeading:       store.userLeading,
-    /* [v4.0] 신규 저장 항목 */
-    fontWeightBoost:   store.fontWeightBoost  ?? 0,
-    contrastScale:     store.contrastScale    ?? 1.0,
-    eyeProtectMinutes: store.eyeProtectMinutes ?? 50,
-    pageTransition:    store.pageTransition   ?? 'fade',
-    onboardingDone:    store.onboardingDone   ?? false,
-    /* [v5.0] FX 상태 저장 */
-    fxAnimation:       store.fxAnimation      ?? true,
-    fxBlur:            store.fxBlur           ?? true,
-    fxZenMode:         store.fxZenMode        ?? true,
+    fontSize:             store.fontSize,
+    lineHeight:           store.lineHeight,
+    theme:                store.theme,
+    flow:                 store.flow,
+    userBg:               store.userBg,
+    userInk:              store.userInk,
+    userSpacing:          store.userSpacing,
+    userLeading:          store.userLeading,
+    /* v4.0 */
+    fontWeightBoost:      store.fontWeightBoost      ?? 0,
+    contrastScale:        store.contrastScale        ?? 1.0,
+    eyeProtectMinutes:    store.eyeProtectMinutes    ?? 50,
+    pageTransition:       store.pageTransition       ?? 'fade',
+    onboardingDone:       store.onboardingDone       ?? false,
+    /* v5.0 FX */
+    fxAnimation:          store.fxAnimation          ?? true,
+    fxBlur:               store.fxBlur              ?? true,
+    fxZenMode:            store.fxZenMode            ?? true,
+    /* v5.0 서재 */
+    showDashboardReport:  store.showDashboardReport  ?? true,
+    tags:                 store.tags                 ?? [],
+    libraryViewMode:      store.libraryViewMode      ?? 'grid',
+    dailyGoalMin:         store.dailyGoalMin         ?? 30,
   };
   try { localStorage.setItem(STATE_KEY, JSON.stringify(snap)); } catch (_) {}
 }
@@ -327,55 +307,51 @@ function _loadStateFromLS() {
     const raw = localStorage.getItem(STATE_KEY); if (!raw) return;
     const s = JSON.parse(raw);
     ReactiveStore.patch({
-      fontSize:          s.fontSize          ?? 100,
-      lineHeight:        s.lineHeight        ?? 'normal',
-      theme:             s.theme             ?? 'paper',
-      flow:              s.flow              ?? 'paginated',
-      userBg:            s.userBg            ?? '#f4f1ea',
-      userInk:           s.userInk           ?? '#1a1814',
-      userSpacing:       s.userSpacing       ?? 0,
-      userLeading:       s.userLeading       ?? 1.85,
-      /* [v4.0] 신규 복원 항목 */
-      fontWeightBoost:   s.fontWeightBoost   ?? 0,
-      contrastScale:     s.contrastScale     ?? 1.0,
-      eyeProtectMinutes: s.eyeProtectMinutes ?? 50,
-      pageTransition:    s.pageTransition    ?? 'fade',
-      onboardingDone:    s.onboardingDone    ?? false,
-      /* [v5.0] FX 상태 복원 */
-      fxAnimation:       s.fxAnimation       ?? true,
-      fxBlur:            s.fxBlur            ?? true,
-      fxZenMode:         s.fxZenMode         ?? true,
+      fontSize:             s.fontSize             ?? 100,
+      lineHeight:           s.lineHeight           ?? 'normal',
+      theme:                s.theme               ?? 'paper',
+      flow:                 s.flow                ?? 'paginated',
+      userBg:               s.userBg              ?? '#f4f1ea',
+      userInk:              s.userInk             ?? '#1a1814',
+      userSpacing:          s.userSpacing         ?? 0,
+      userLeading:          s.userLeading         ?? 1.85,
+      /* v4.0 */
+      fontWeightBoost:      s.fontWeightBoost      ?? 0,
+      contrastScale:        s.contrastScale        ?? 1.0,
+      eyeProtectMinutes:    s.eyeProtectMinutes    ?? 50,
+      pageTransition:       s.pageTransition       ?? 'fade',
+      onboardingDone:       s.onboardingDone       ?? false,
+      /* v5.0 FX */
+      fxAnimation:          s.fxAnimation          ?? true,
+      fxBlur:               s.fxBlur              ?? true,
+      fxZenMode:            s.fxZenMode            ?? true,
+      /* v5.0 서재 */
+      showDashboardReport:  s.showDashboardReport  ?? true,
+      tags:                 Array.isArray(s.tags) ? s.tags : [],
+      libraryViewMode:      s.libraryViewMode      ?? 'grid',
+      dailyGoalMin:         s.dailyGoalMin         ?? 30,
     });
   } catch (_) {}
 }
 
-
 /* ══════════════════════════════════════════════════════════════════
-   [v5.0] §34-FX. 비주얼 특수효과(FX) 제어 — 핵심 로직
-   ─────────────────────────────────────────────────────────────────
-   applyFxState():
-     store.fxAnimation / fxBlur / fxZenMode 값을 읽어
-     <html> 엘리먼트의 data-fx-* 어트리뷰트를 선언적으로 설정.
-     fx.css의 §11 가드 셀렉터가 이를 감지해 효과를 비활성화함.
+   §34. 비주얼 특수효과(FX) 제어
    ══════════════════════════════════════════════════════════════════ */
 function applyFxState() {
   const html = document.documentElement;
 
-  /* A: 애니메이션 */
   if (store.fxAnimation === false) {
     html.setAttribute('data-fx-anim', 'off');
   } else {
     html.removeAttribute('data-fx-anim');
   }
 
-  /* B: 글래스모피즘 블러 */
   if (store.fxBlur === false) {
     html.setAttribute('data-fx-blur', 'off');
   } else {
     html.removeAttribute('data-fx-blur');
   }
 
-  /* C: 젠 모드 */
   if (store.fxZenMode === false) {
     html.setAttribute('data-fx-zen', 'off');
   } else {
@@ -383,14 +359,10 @@ function applyFxState() {
   }
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   FX 설정 UI 헬퍼 — 단일 토글 바인딩 생성
-   ────────────────────────────────────────────────────────────────── */
 function _bindFxToggle(checkboxId, storeKey) {
   const el = DOMProxy.get(checkboxId);
   if (!el || el === DOMProxy.VOID_NODE) return;
 
-  /* 초기 상태 동기 */
   el.checked = store[storeKey] !== false;
 
   el.addEventListener('change', () => {
@@ -399,20 +371,13 @@ function _bindFxToggle(checkboxId, storeKey) {
     _saveStateToLS();
   });
 
-  /* ReactiveStore 구독 — 외부에서 상태 변경 시 UI 동기화 */
   ReactiveStore.subscribe(storeKey, (v) => {
     el.checked = (v !== false);
     applyFxState();
   });
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   FX 섹션 동적 삽입 — settings-panel 하단에 마운트
-   index.html에 #fx-settings-section 요소가 없을 경우에만 동적 생성.
-   이미 HTML에 마크업이 존재하면 바인딩만 수행.
-   ────────────────────────────────────────────────────────────────── */
 function _mountFxSection() {
-  /* 이미 HTML 내에 섹션이 존재하는 경우 → 바인딩만 */
   if (DOMProxy.exists('fx-settings-section')) {
     _bindFxToggle('fx-toggle-animation', 'fxAnimation');
     _bindFxToggle('fx-toggle-blur',      'fxBlur');
@@ -420,16 +385,13 @@ function _mountFxSection() {
     return;
   }
 
-  /* settings-panel 내부에 삽입할 부모 탐색 */
   const panel = DOMProxy.get('settings-panel');
   if (!panel || panel === DOMProxy.VOID_NODE) return;
 
-  /* 섹션 마크업 생성 — XSS 방어: textContent/setAttribute 사용 */
   const section = document.createElement('div');
   section.id = 'fx-settings-section';
   section.className = 'settings-section fx-section';
 
-  /* 섹션 헤더 */
   const header = document.createElement('div');
   header.className = 'settings-section-header';
   const title = document.createElement('h3');
@@ -438,26 +400,10 @@ function _mountFxSection() {
   header.appendChild(title);
   section.appendChild(header);
 
-  /* 토글 항목 정의 */
   const items = [
-    {
-      id:          'fx-toggle-animation',
-      storeKey:    'fxAnimation',
-      label:       '애니메이션 및 페이지 전환 효과',
-      description: '3D 플립, 페이드, 팝업 트랜지션을 활성화합니다.',
-    },
-    {
-      id:          'fx-toggle-blur',
-      storeKey:    'fxBlur',
-      label:       '글래스모피즘 및 백드롭 블러 효과',
-      description: '상하단 바에 반투명 블러 배경을 적용합니다. 저사양 기기에서는 끄면 성능이 향상됩니다.',
-    },
-    {
-      id:          'fx-toggle-zen',
-      storeKey:    'fxZenMode',
-      label:       '몰입형 젠 모드 (자동 UI 숨김)',
-      description: '2초간 조작이 없으면 상하단 바를 자동으로 숨깁니다.',
-    },
+    { id: 'fx-toggle-animation', storeKey: 'fxAnimation', label: '애니메이션 및 페이지 전환 효과',  description: '3D 플립, 페이드, 팝업 트랜지션을 활성화합니다.' },
+    { id: 'fx-toggle-blur',      storeKey: 'fxBlur',      label: '글래스모피즘 및 백드롭 블러 효과', description: '상하단 바에 반투명 블러 배경을 적용합니다. 저사양 기기에서는 끄면 성능이 향상됩니다.' },
+    { id: 'fx-toggle-zen',       storeKey: 'fxZenMode',   label: '몰입형 젠 모드 (자동 UI 숨김)',    description: '2초간 조작이 없으면 상하단 바를 자동으로 숨깁니다.' },
   ];
 
   items.forEach(item => {
@@ -465,45 +411,32 @@ function _mountFxSection() {
     row.className = 'fx-toggle-row';
     row.htmlFor = item.id;
 
-    /* 텍스트 그룹 */
     const textGroup = document.createElement('div');
     textGroup.className = 'fx-toggle-text';
-
     const labelEl = document.createElement('span');
     labelEl.className = 'fx-toggle-label';
     labelEl.textContent = item.label;
-
     const descEl = document.createElement('span');
     descEl.className = 'fx-toggle-desc';
     descEl.textContent = item.description;
+    textGroup.append(labelEl, descEl);
 
-    textGroup.appendChild(labelEl);
-    textGroup.appendChild(descEl);
-
-    /* 토글 스위치 */
     const switchWrap = document.createElement('div');
     switchWrap.className = 'fx-toggle-switch-wrap';
-
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.id   = item.id;
     checkbox.className = 'fx-toggle-checkbox';
     checkbox.checked = store[item.storeKey] !== false;
-
-    /* 커스텀 스위치 트랙 */
     const track = document.createElement('span');
     track.className = 'fx-toggle-track';
     track.setAttribute('aria-hidden', 'true');
+    switchWrap.append(checkbox, track);
 
-    switchWrap.appendChild(checkbox);
-    switchWrap.appendChild(track);
-
-    row.appendChild(textGroup);
-    row.appendChild(switchWrap);
+    row.append(textGroup, switchWrap);
     section.appendChild(row);
   });
 
-  /* 인라인 스타일 — fx.css가 로드되기 전 최소 레이아웃 보장 */
   const style = document.createElement('style');
   style.textContent = `
     .fx-section { padding: 16px 20px 20px; border-top: 1px solid rgba(120,100,80,0.12); }
@@ -515,60 +448,297 @@ function _mountFxSection() {
     .fx-toggle-desc  { font-size: 11.5px; color: var(--color-ink-muted, #8a7a6a); line-height: 1.4; }
     .fx-toggle-switch-wrap { position: relative; flex-shrink: 0; }
     .fx-toggle-checkbox { position: absolute; opacity: 0; width: 0; height: 0; }
-    .fx-toggle-track {
-      display: block; width: 44px; height: 24px; border-radius: 12px;
-      background: rgba(120,100,80,0.22); cursor: pointer;
-      transition: background 0.22s ease, box-shadow 0.22s ease;
-      position: relative;
-    }
-    .fx-toggle-track::after {
-      content: ''; position: absolute; top: 3px; left: 3px;
-      width: 18px; height: 18px; border-radius: 50%;
-      background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.22);
-      transition: transform 0.22s cubic-bezier(0.4,0,0.2,1), background 0.22s ease;
-    }
-    .fx-toggle-checkbox:checked + .fx-toggle-track {
-      background: var(--color-accent, #c8864a);
-      box-shadow: 0 0 0 2px rgba(200,134,74,0.22);
-    }
+    .fx-toggle-track { display: block; width: 44px; height: 24px; border-radius: 12px; background: rgba(120,100,80,0.22); cursor: pointer; transition: background 0.22s ease, box-shadow 0.22s ease; position: relative; }
+    .fx-toggle-track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.22); transition: transform 0.22s cubic-bezier(0.4,0,0.2,1); }
+    .fx-toggle-checkbox:checked + .fx-toggle-track { background: var(--color-accent, #c8864a); box-shadow: 0 0 0 2px rgba(200,134,74,0.22); }
     .fx-toggle-checkbox:checked + .fx-toggle-track::after { transform: translateX(20px); }
     .fx-toggle-checkbox:focus-visible + .fx-toggle-track { outline: 2px solid var(--color-accent, #c8864a); outline-offset: 2px; }
+    /* 태그 관리 섹션 */
+    .tag-mgmt-section { padding: 16px 20px 20px; border-top: 1px solid rgba(120,100,80,0.12); }
+    .tag-mgmt-title { font-size: 13px; font-weight: 600; color: var(--color-ink-muted, #7a6a5a); margin: 0 0 12px; letter-spacing: 0.3px; }
+    .tag-mgmt-genre-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .tag-mgmt-genre-chip { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 20px; font-size: 11.5px; font-weight: 500; border: none; cursor: default; }
+    .tag-mgmt-input-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .tag-mgmt-input { flex: 1; padding: 7px 10px; border-radius: 8px; border: 1px solid rgba(120,100,80,0.22); background: rgba(255,255,255,0.5); font-size: 13px; color: var(--color-ink, #1a1814); outline: none; transition: border-color 0.18s ease; }
+    [data-theme="dark"] .tag-mgmt-input { background: rgba(30,24,18,0.5); color: #f0e8d8; }
+    .tag-mgmt-input:focus { border-color: var(--color-accent, #c8864a); }
+    .tag-mgmt-add-btn { padding: 7px 14px; border-radius: 8px; border: none; background: var(--color-accent, #c8864a); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: opacity 0.18s ease, transform 0.15s ease; }
+    .tag-mgmt-add-btn:hover { opacity: 0.88; transform: scale(1.04); }
+    .tag-mgmt-add-btn:active { transform: scale(0.97); }
+    .tag-mgmt-custom-list { display: flex; flex-wrap: wrap; gap: 6px; min-height: 24px; }
+    .tag-mgmt-custom-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px 4px 10px; border-radius: 20px; background: rgba(120,100,80,0.10); border: 1px solid rgba(120,100,80,0.16); font-size: 12px; color: var(--color-ink, #1a1814); }
+    .tag-mgmt-custom-del { border: none; background: none; cursor: pointer; font-size: 13px; line-height: 1; color: var(--color-ink-muted, #8a7a6a); padding: 0 2px; transition: color 0.15s ease; }
+    .tag-mgmt-custom-del:hover { color: #c03a2b; }
+    /* HUD 토글 섹션 */
+    .hud-toggle-section { padding: 14px 20px 16px; border-top: 1px solid rgba(120,100,80,0.12); }
+    .hud-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .hud-toggle-text { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    .hud-toggle-label { font-size: 13.5px; font-weight: 500; color: var(--color-ink, #1a1814); }
+    .hud-toggle-desc  { font-size: 11.5px; color: var(--color-ink-muted, #8a7a6a); line-height: 1.4; }
   `;
   document.head.appendChild(style);
 
-  /* 패널 하단에 삽입 */
   panel.appendChild(section);
 
-  /* 이벤트 바인딩 */
-  items.forEach(item => {
-    _bindFxToggle(item.id, item.storeKey);
-  });
+  items.forEach(item => { _bindFxToggle(item.id, item.storeKey); });
 }
 
-/* ══════════════════════════════════════════════════════════════════
-   [v5.0] FX 설정 전체 초기화 진입점
-   ══════════════════════════════════════════════════════════════════ */
 function initFxSettingsUI() {
   _mountFxSection();
-  /* 부팅 시 저장된 FX 상태를 즉시 html 어트리뷰트에 반영 */
   applyFxState();
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   §35. [v5.0 신규] 태그 관리 섹션 — 커스텀 태그 동적 생성기
+   ─────────────────────────────────────────────────────────────────
+   - 장르 태그(GENRE_TAGS) 미리보기 칩 렌더
+   - <input> + [태그 생성] 버튼 → store.tags push
+   - 커스텀 태그 칩 삭제 버튼 → store.tags splice
+   - 3-Way 리액티브: store.tags 변화 → 이 섹션 + 태그 바 + 팝업 자동 동기화
+   ══════════════════════════════════════════════════════════════════ */
+function _mountTagManagementSection() {
+  /* 이미 마운트된 경우 바인딩만 수행 */
+  if (DOMProxy.exists('tag-mgmt-section')) {
+    _bindTagManagementSection();
+    return;
+  }
+
+  const panel = DOMProxy.get('settings-panel');
+  if (!panel || panel === DOMProxy.VOID_NODE) return;
+
+  const section = document.createElement('div');
+  section.id = 'tag-mgmt-section';
+  section.className = 'tag-mgmt-section';
+
+  /* 섹션 타이틀 */
+  const titleEl = document.createElement('h3');
+  titleEl.className = 'tag-mgmt-title';
+  titleEl.textContent = '🏷 태그 및 서재 분류 관리';
+  section.appendChild(titleEl);
+
+  /* 장르 태그 미리보기 */
+  const genreLabel = document.createElement('div');
+  genreLabel.style.cssText = 'font-size:11.5px;color:var(--color-ink-muted,#8a7a6a);margin-bottom:6px;';
+  genreLabel.textContent = '기본 장르 태그';
+  section.appendChild(genreLabel);
+
+  const genreGrid = document.createElement('div');
+  genreGrid.className = 'tag-mgmt-genre-grid';
+  GENRE_TAGS.forEach(({ name, color, bg }) => {
+    const chip = document.createElement('span');
+    chip.className = 'tag-mgmt-genre-chip';
+    chip.textContent = '#' + name;
+    chip.style.color      = color;
+    chip.style.background = bg;
+    chip.style.border     = `1px solid ${color}44`;
+    genreGrid.appendChild(chip);
+  });
+  section.appendChild(genreGrid);
+
+  /* 커스텀 태그 생성 입력 영역 */
+  const customLabel = document.createElement('div');
+  customLabel.style.cssText = 'font-size:11.5px;color:var(--color-ink-muted,#8a7a6a);margin:10px 0 6px;';
+  customLabel.textContent = '커스텀 태그 생성';
+  section.appendChild(customLabel);
+
+  const inputRow = document.createElement('div');
+  inputRow.className = 'tag-mgmt-input-row';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.id   = 'tag-mgmt-input';
+  input.className   = 'tag-mgmt-input';
+  input.placeholder = '태그 이름 입력 (최대 20자)…';
+  input.maxLength   = 20;
+
+  const addBtn = document.createElement('button');
+  addBtn.id = 'tag-mgmt-add-btn';
+  addBtn.className = 'tag-mgmt-add-btn';
+  addBtn.textContent = '태그 생성';
+
+  inputRow.append(input, addBtn);
+  section.appendChild(inputRow);
+
+  /* 커스텀 태그 칩 목록 */
+  const customList = document.createElement('div');
+  customList.id = 'tag-mgmt-custom-list';
+  customList.className = 'tag-mgmt-custom-list';
+  section.appendChild(customList);
+
+  panel.appendChild(section);
+
+  _bindTagManagementSection();
+}
+
+function _bindTagManagementSection() {
+  const input      = DOMProxy.get('tag-mgmt-input');
+  const addBtn     = DOMProxy.get('tag-mgmt-add-btn');
+  const customList = DOMProxy.get('tag-mgmt-custom-list');
+
+  if (!input || input === DOMProxy.VOID_NODE) return;
+
+  /* 커스텀 태그 목록 렌더 함수 */
+  function _renderCustomTags() {
+    const tags = store.tags || [];
+    customList.innerHTML = '';
+    if (!tags.length) {
+      const empty = document.createElement('span');
+      empty.style.cssText = 'font-size:11.5px;color:var(--color-ink-muted,#8a7a6a);';
+      empty.textContent = '생성된 커스텀 태그가 없습니다.';
+      customList.appendChild(empty);
+      return;
+    }
+    tags.forEach((tagName, idx) => {
+      const chip = document.createElement('span');
+      chip.className = 'tag-mgmt-custom-chip';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = '#' + tagName;
+      chip.appendChild(nameSpan);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'tag-mgmt-custom-del';
+      delBtn.textContent = '✕';
+      delBtn.setAttribute('aria-label', `#${tagName} 태그 삭제`);
+      delBtn.addEventListener('click', () => {
+        const newTags = (store.tags || []).filter((_, i) => i !== idx);
+        store.tags = newTags;
+        _saveStateToLS();
+        Toast.show(`'#${tagName}' 태그가 삭제되었습니다.`, 'info');
+      });
+      chip.appendChild(delBtn);
+      customList.appendChild(chip);
+    });
+  }
+
+  /* 태그 추가 핸들러 */
+  function _addTag() {
+    const val = input.value.trim().slice(0, 20);
+    if (!val) { Toast.show('태그 이름을 입력해 주세요.', 'error'); return; }
+    /* 장르 태그와 중복 체크 */
+    const genreNames = GENRE_TAGS.map(g => g.name);
+    if (genreNames.includes(val)) { Toast.show(`'#${val}'은 기본 장르 태그입니다.`, 'info'); input.value = ''; return; }
+    const existing = store.tags || [];
+    if (existing.includes(val)) { Toast.show(`'#${val}' 태그가 이미 존재합니다.`, 'info'); input.value = ''; return; }
+
+    store.tags = [...existing, val];
+    _saveStateToLS();
+    input.value = '';
+    Toast.show(`'#${val}' 태그가 생성되었습니다.`, 'success');
+  }
+
+  addBtn.addEventListener('click', _addTag);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); _addTag(); } });
+
+  /* store.tags 변화 → 커스텀 칩 목록 리액티브 동기화 */
+  ReactiveStore.subscribe('tags', () => { _renderCustomTags(); });
+
+  /* 초기 렌더 */
+  _renderCustomTags();
+}
+
+function initTagManagementUI() {
+  _mountTagManagementSection();
+}
 
 /* ══════════════════════════════════════════════════════════════════
-   [v4.0] §신규 설정 UI 전체 초기화 진입점 — v5.0 FX 추가
-   main.js의 initButtonEventHandlers() 내에서 호출
+   §36. [v5.0 신규] 서재 하단 HUD 표시 토글 스위치
+   ─────────────────────────────────────────────────────────────────
+   설정 패널 내 showDashboardReport 온/오프 토글 세그먼트
+   store.showDashboardReport ↔ #dashboard-hud 리액티브 연동
+   ══════════════════════════════════════════════════════════════════ */
+function _mountDashboardHudToggle() {
+  if (DOMProxy.exists('hud-toggle-section')) {
+    _bindDashboardHudToggle();
+    return;
+  }
+
+  const panel = DOMProxy.get('settings-panel');
+  if (!panel || panel === DOMProxy.VOID_NODE) return;
+
+  const section = document.createElement('div');
+  section.id = 'hud-toggle-section';
+  section.className = 'hud-toggle-section';
+
+  const row = document.createElement('label');
+  row.className = 'hud-toggle-row';
+  row.htmlFor   = 'hud-toggle-checkbox';
+  row.style.cursor = 'pointer';
+
+  const textGroup = document.createElement('div');
+  textGroup.className = 'hud-toggle-text';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'hud-toggle-label';
+  labelEl.textContent = '📊 독서 리포트 HUD 표시';
+
+  const descEl = document.createElement('span');
+  descEl.className = 'hud-toggle-desc';
+  descEl.textContent = '서재 하단의 주간 독서 추이, 목표 달성률, 인사이트 카드 표시를 설정합니다.';
+
+  textGroup.append(labelEl, descEl);
+
+  const switchWrap = document.createElement('div');
+  switchWrap.className = 'fx-toggle-switch-wrap'; /* 동일 스위치 스타일 재사용 */
+
+  const checkbox = document.createElement('input');
+  checkbox.type      = 'checkbox';
+  checkbox.id        = 'hud-toggle-checkbox';
+  checkbox.className = 'fx-toggle-checkbox';
+  checkbox.checked   = store.showDashboardReport !== false;
+
+  const track = document.createElement('span');
+  track.className = 'fx-toggle-track';
+  track.setAttribute('aria-hidden', 'true');
+
+  switchWrap.append(checkbox, track);
+  row.append(textGroup, switchWrap);
+  section.appendChild(row);
+
+  panel.appendChild(section);
+
+  _bindDashboardHudToggle();
+}
+
+function _bindDashboardHudToggle() {
+  const checkbox = DOMProxy.get('hud-toggle-checkbox');
+  if (!checkbox || checkbox === DOMProxy.VOID_NODE) return;
+
+  checkbox.checked = store.showDashboardReport !== false;
+
+  checkbox.addEventListener('change', () => {
+    store.showDashboardReport = checkbox.checked;
+    _saveStateToLS();
+  });
+
+  ReactiveStore.subscribe('showDashboardReport', (v) => {
+    checkbox.checked = (v !== false);
+  });
+}
+
+function initDashboardHudToggleUI() {
+  _mountDashboardHudToggle();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §37. [v5.0] 설정 UI 전체 초기화 진입점
    ══════════════════════════════════════════════════════════════════ */
 function initV4SettingsUI() {
   initFontWeightBoostSlider();
   initContrastScaleSlider();
   initEyeProtectMinutesInput();
   initPageTransitionSelector();
-  /* [v5.0] FX 제어 패널 추가 초기화 */
+  /* v5.0 FX 제어 패널 */
   initFxSettingsUI();
+  /* v5.0 태그 관리 섹션 */
+  initTagManagementUI();
+  /* v5.0 HUD 토글 스위치 */
+  initDashboardHudToggleUI();
 }
 
-
+/* ══════════════════════════════════════════════════════════════════
+   Exports — 중복 export 없이 단일 블록 정의
+   ══════════════════════════════════════════════════════════════════ */
 export {
   initFontUploader,
   FontLazyLoader,
@@ -585,4 +755,6 @@ export {
   _loadStateFromLS,
   applyFxState,
   initFxSettingsUI,
+  initTagManagementUI,
+  initDashboardHudToggleUI,
 };
