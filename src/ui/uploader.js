@@ -1243,7 +1243,6 @@ export {
   renderTagBar,
   renderLibraryGrid,
   importEpubFiles,
-  truncateTitle,
 };
 
 /* computeFileHash 폴백 export (외부 참조 호환) */
