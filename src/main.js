@@ -51,7 +51,7 @@ import {
 } from './reader.js';
 import {
   HashWorker, refreshLibraryData, renderLibraryGrid, importEpubFiles,
-} from './uploader.js';
+} from './ui/uploader.js';
 import {
   renderTocSidebar, updateTocActiveItem,
   ReadingStatsTracker, SearchEngine, VirtualSearchList, runSearchExecution,
