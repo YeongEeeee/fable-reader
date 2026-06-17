@@ -1,7 +1,19 @@
 /**
- * src/ui/viewer.js  ── Fable Premium v4.2
+ * src/ui/viewer.js  ── Fable Premium v5.0
  * ─────────────────────────────────────────────────────────────────
  * 독서(뷰어) UI + 부가 기능 모듈
+ *
+ * [v5.0 설정 UI/UX 대개혁]
+ *   [QuickSettingsPopover] 뷰어 본문 중앙/하단 탭(Tap) 시 노출되는
+ *     '맥락형 빠른 설정' 글래스모피즘 팝오버. 테마 즉시 전환(세피아↔다크↔라이트),
+ *     글자 크기 +/-, 3D 페이지 넘김 ↔ 스크롤 모드 즉시 전환을 제공한다.
+ *     자주 쓰는 설정만 노출하며, 심화 설정(자동 태깅/인사이트 주기/하이픈)은
+ *     ui/settings.js 패널로 위임한다 (2단계 계층 구조).
+ *   [GoalCelebration] 일일 독서 목표 100% 달성 시 앰버 파티클 세레머니를
+ *     트리거한다. ReadingStatsTracker._updateUI()의 기존 1회성 토스트
+ *     알림 지점에 연동되며, fx.css의 .goal-particle 키프레임을 사용한다.
+ *     CSS 애니메이션과 동기화된 짧은 진동(Vibration API) 햅틱을 제안하고,
+ *     store.fxAnimation === false 인 경우 파티클 생성을 생략한다.
  *
  * v4.0 고도화 사항:
  *   [OnboardingGuide]  store.onboardingDone === false 일 때 600ms 후 순차 하이라이트 온보딩
@@ -28,6 +40,8 @@
  * ※ 순환 의존성 차단:
  *   uploader.js와 viewer.js는 직접 상호 import 금지.
  *   uploader.js → refreshLibraryData만 단방향 import 허용.
+ *   settings.js → viewer.js import 금지 (동일 원칙); 이 파일도 settings.js를
+ *   import하지 않으며, 독서 프로필 동기화는 store를 매개로만 이루어진다.
  * ─────────────────────────────────────────────────────────────────
  */
 
@@ -39,7 +53,7 @@ import {
 } from '../store.js';
 import { StorageSystem } from '../database.js';
 import { AnnotationSyncEngine } from '../sync.js';
-import { openEpubBook, waitForEpubJS, awaitBookReady } from '../reader.js';
+import { openEpubBook, waitForEpubJS, awaitBookReady, switchFlowMode } from '../reader.js';
 import { refreshLibraryData } from './uploader.js';
 
 /* ══════════════════════════════════════════════════════════
@@ -729,6 +743,302 @@ const PageTransitionEngine = (() => {
 })();
 
 /* ══════════════════════════════════════════════════════════
+   §23-E. [v5.0 신규] 맥락형 빠른 설정(Contextual Quick Settings) 팝오버
+   ─────────────────────────────────────────────────────────
+   뷰어 본문(viewer-viewport) 중앙/하단 탭(Tap) 시 노출되는
+   글래스모피즘 팝오버 툴바. 다음 3가지를 즉시 전환한다:
+     1) 테마 순환 토글 (세피아=paper ↔ 다크=dark ↔ 라이트=white)
+     2) 글자 크기 +/- 증감 (기존 btn-font-decrease/increase와 동일 step)
+     3) 3D 페이지 넘김(paginated) ↔ 스크롤(scrolled) 모드 즉시 전환
+   독서 흐름을 방해하지 않도록 자동 닫힘(외부 탭/Esc/팝오버 자체 재탭)과
+   젠 모드(fxZenMode) 와 동일한 활동 감지 패턴을 공유한다.
+   ══════════════════════════════════════════════════════════ */
+const QuickSettingsPopover = (() => {
+  let el = null;
+  let _outsideHandler = null;
+  let _autoCloseTimer = null;
+  const AUTO_CLOSE_MS = 6000;
+  const THEME_CYCLE = ['paper', 'dark', 'white'];
+
+  function _injectCSSOnce() {
+    if (DOMProxy.exists('quick-settings-popover')) return;
+  }
+
+  function _build() {
+    const popover = document.createElement('div');
+    popover.id = 'quick-settings-popover';
+    popover.className = 'quick-settings-popover';
+    popover.setAttribute('role', 'toolbar');
+    popover.setAttribute('aria-label', '빠른 설정');
+
+    /* 1) 테마 순환 토글 */
+    const themeBtn = document.createElement('button');
+    themeBtn.type = 'button';
+    themeBtn.id = 'qsp-btn-theme';
+    themeBtn.className = 'quick-settings-btn';
+    themeBtn.setAttribute('aria-label', '테마 전환');
+    themeBtn.title = '테마 전환 (세피아 → 다크 → 라이트)';
+    const themeDot = document.createElement('span');
+    themeDot.className = 'quick-settings-theme-dot';
+    themeDot.dataset.themeDot = 'paper';
+    themeBtn.appendChild(themeDot);
+
+    const divider1 = document.createElement('div');
+    divider1.className = 'quick-settings-divider';
+    divider1.setAttribute('aria-hidden', 'true');
+
+    /* 2) 글자 크기 +/- */
+    const fontGroup = document.createElement('div');
+    fontGroup.className = 'quick-settings-group';
+
+    const fontMinusBtn = document.createElement('button');
+    fontMinusBtn.type = 'button';
+    fontMinusBtn.id = 'qsp-btn-font-minus';
+    fontMinusBtn.className = 'quick-settings-btn';
+    fontMinusBtn.setAttribute('aria-label', '글자 크기 줄이기');
+    fontMinusBtn.textContent = 'A−';
+
+    const fontLabel = document.createElement('span');
+    fontLabel.id = 'qsp-font-label';
+    fontLabel.className = 'quick-settings-font-label';
+    fontLabel.textContent = `${store.fontSize}%`;
+
+    const fontPlusBtn = document.createElement('button');
+    fontPlusBtn.type = 'button';
+    fontPlusBtn.id = 'qsp-btn-font-plus';
+    fontPlusBtn.className = 'quick-settings-btn';
+    fontPlusBtn.setAttribute('aria-label', '글자 크기 키우기');
+    fontPlusBtn.textContent = 'A+';
+
+    fontGroup.append(fontMinusBtn, fontLabel, fontPlusBtn);
+
+    const divider2 = document.createElement('div');
+    divider2.className = 'quick-settings-divider';
+    divider2.setAttribute('aria-hidden', 'true');
+
+    /* 3) 페이지 넘김 ↔ 스크롤 모드 토글 */
+    const flowBtn = document.createElement('button');
+    flowBtn.type = 'button';
+    flowBtn.id = 'qsp-btn-flow';
+    flowBtn.className = 'quick-settings-btn';
+    flowBtn.setAttribute('aria-label', '보기 모드 전환');
+    flowBtn.title = '3D 페이지 넘김 ↔ 스크롤 모드';
+    flowBtn.textContent = store.flow === 'scrolled' ? '↕' : '▤';
+
+    popover.append(themeBtn, divider1, fontGroup, divider2, flowBtn);
+    return popover;
+  }
+
+  function _syncThemeDot() {
+    const dot = DOMProxy.get('qsp-btn-theme')?.querySelector?.('.quick-settings-theme-dot');
+    if (dot) dot.dataset.themeDot = THEME_CYCLE.includes(store.theme) ? store.theme : 'paper';
+  }
+
+  function _syncFontLabel() {
+    setTextSafe(DOMProxy.get('qsp-font-label'), `${store.fontSize}%`);
+  }
+
+  function _syncFlowIcon() {
+    const btn = DOMProxy.get('qsp-btn-flow');
+    if (btn && btn !== DOMProxy.VOID_NODE) {
+      btn.textContent = store.flow === 'scrolled' ? '↕' : '▤';
+      btn.classList.toggle('active', store.flow === 'scrolled');
+    }
+  }
+
+  function _resetAutoCloseTimer() {
+    clearTimeout(_autoCloseTimer);
+    _autoCloseTimer = setTimeout(close, AUTO_CLOSE_MS);
+    ResourceRegistry.addTimer(_autoCloseTimer);
+  }
+
+  function open() {
+    if (!el) {
+      _injectCSSOnce();
+      el = _build();
+      document.body.appendChild(el);
+
+      DOMProxy.invalidate('qsp-btn-theme');
+      DOMProxy.invalidate('qsp-font-label');
+      DOMProxy.invalidate('qsp-btn-flow');
+
+      el.querySelector('#qsp-btn-theme').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = THEME_CYCLE.indexOf(store.theme);
+        const next = THEME_CYCLE[(idx + 1 + THEME_CYCLE.length) % THEME_CYCLE.length] || 'paper';
+        store.theme = next;
+        try { localStorage.setItem('fable_v3_state_theme_hint', next); } catch (_) {}
+        _resetAutoCloseTimer();
+      });
+
+      el.querySelector('#qsp-btn-font-minus').addEventListener('click', (e) => {
+        e.stopPropagation();
+        store.fontSize = Math.max(60, store.fontSize - 5);
+        _resetAutoCloseTimer();
+      });
+      el.querySelector('#qsp-btn-font-plus').addEventListener('click', (e) => {
+        e.stopPropagation();
+        store.fontSize = Math.min(200, store.fontSize + 5);
+        _resetAutoCloseTimer();
+      });
+
+      el.querySelector('#qsp-btn-flow').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const next = store.flow === 'scrolled' ? 'paginated' : 'scrolled';
+        store.flow = next;
+        try { await switchFlowMode(next); } catch (err) { ErrorBoundary.handle('renderer', err, 'qsp:flow'); }
+        _resetAutoCloseTimer();
+      });
+
+      el.addEventListener('pointerdown', (e) => e.stopPropagation());
+    }
+
+    _syncThemeDot();
+    _syncFontLabel();
+    _syncFlowIcon();
+
+    requestAnimationFrame(() => { el.classList.add('is-open'); });
+    store.quickPopoverOpen = true;
+
+    if (!_outsideHandler) {
+      _outsideHandler = (e) => {
+        if (el && !el.contains?.(e.target)) close();
+      };
+      ResourceRegistry.addListener(document, 'pointerdown', _outsideHandler, { passive: true });
+    }
+
+    _resetAutoCloseTimer();
+  }
+
+  function close() {
+    clearTimeout(_autoCloseTimer);
+    if (el) el.classList.remove('is-open');
+    store.quickPopoverOpen = false;
+  }
+
+  function toggle() {
+    if (store.quickPopoverOpen) close();
+    else open();
+  }
+
+  function isOpen() { return store.quickPopoverOpen === true; }
+
+  return { open, close, toggle, isOpen };
+})();
+
+/* ══════════════════════════════════════════════════════════
+   §23-F. [v5.0 신규] 목표 달성 앰버 파티클 세레머니 (GoalCelebration)
+   ─────────────────────────────────────────────────────────
+   일일 독서 목표(dailyGoalMin) 100% 달성 시 fx.css의 .goal-particle
+   키프레임을 이용해 진행 바 주변에 앰버 파티클을 흩뿌린다.
+   ReadingStatsTracker._updateUI()의 1회성 알림 지점(fill.dataset.notified)
+   에서 호출되며, store.goalCelebrationShown 가드로 store 레벨에서도
+   중복 실행을 차단한다. store.fxAnimation === false 인 경우 파티클 생성을
+   생략하고 진동(Vibration API) 햅틱만 짧게 제안한다.
+   ══════════════════════════════════════════════════════════ */
+const GoalCelebration = (() => {
+  const PARTICLE_COUNT = 14;
+  const PARTICLE_COLORS = ['#c8864a', '#e0a868', '#a8682e'];
+
+  function _vibrate() {
+    /* [햅틱 제안] 짧은 더블 펄스 — 디바이스가 미지원이면 자동 무시 */
+    try { navigator.vibrate?.([40, 60, 40]); } catch (_) {}
+  }
+
+  function _playChime() {
+    /* [효과음 제안] Web Audio 기반 짧은 차임벨 — 합성음이므로 외부
+       리소스 의존 없이 즉시 재생 가능. 오디오 컨텍스트 생성 실패(자동
+       재생 정책 등) 시 조용히 무시한다. */
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.18);
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+      setTimeout(() => { try { ctx.close(); } catch (_) {} }, 600);
+    } catch (_) {}
+  }
+
+  function _burstFrom(anchorEl) {
+    if (!anchorEl || anchorEl === DOMProxy.VOID_NODE) return;
+    let rect = anchorEl.getBoundingClientRect?.();
+
+    /* [v5.0 안전장치] 앵커 요소가 display:none인 모달(stats-modal) 내부에
+       있을 경우 rect가 {0,0,0,0}으로 측정되어 파티클이 좌상단에 뭉치는
+       시각적 결함이 발생한다. 이 경우 화면 하단 중앙으로 폴백한다. */
+    const isInvisible = !rect || (rect.width === 0 && rect.height === 0 && rect.top === 0 && rect.left === 0);
+    if (isInvisible) {
+      rect = {
+        left: window.innerWidth / 2 - 60, top: window.innerHeight - 160,
+        width: 120, height: 8,
+      };
+    }
+
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed; left:0; top:0; width:0; height:0; pointer-events:none; z-index:9950;';
+    document.body.appendChild(host);
+
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const p = document.createElement('span');
+      p.className = 'goal-particle';
+      const size = 4 + Math.random() * 5;
+      const tx   = (Math.random() - 0.5) * 70;
+      const dur  = 0.6 + Math.random() * 0.5;
+      const x    = rect.left + rect.width  * Math.random();
+      const y    = rect.top  + rect.height * Math.random();
+      p.style.left   = `${x}px`;
+      p.style.top    = `${y}px`;
+      p.style.width  = `${size}px`;
+      p.style.height = `${size}px`;
+      p.style.setProperty('--tx', `${tx}px`);
+      p.style.setProperty('--dur', `${dur}s`);
+      p.style.background = PARTICLE_COLORS[i % PARTICLE_COLORS.length];
+      host.appendChild(p);
+      p.addEventListener('animationend', () => p.remove(), { once: true });
+    }
+
+    setTimeout(() => { host.remove(); }, 1400);
+  }
+
+  function celebrate() {
+    if (store.goalCelebrationShown) return;
+    store.goalCelebrationShown = true;
+
+    _vibrate();
+    _playChime();
+
+    if (store.fxAnimation === false) return;
+
+    const fill = DOMProxy.get('goal-progress-fill');
+    _burstFrom(fill);
+
+    const card = DOMProxy.q('.dash-card--goal');
+    if (card && card !== DOMProxy.VOID_NODE) {
+      card.classList.add('goal-achieved');
+      setTimeout(() => card.classList.remove('goal-achieved'), 1300);
+    }
+  }
+
+  /* 새로운 날짜로 넘어가면(자정 경과) 가드를 재설정해야 하므로,
+     readingSession.startTime 기준 날짜와 현재 날짜를 비교해 리셋한다.
+     ReadingStatsTracker.startSession()이 새 세션을 열 때 호출된다. */
+  function resetDailyGuard() {
+    store.goalCelebrationShown = false;
+  }
+
+  return { celebrate, resetDailyGuard };
+})();
+
+/* ══════════════════════════════════════════════════════════
    §24-X. TTS 시스템
    ─────────────────────────────────────────────────────────
    [v4.2 고도화]
@@ -883,8 +1193,20 @@ const ReadingStatsTracker = (() => {
   let timer = null;
   let pendingSeconds = 0;
 
+  /* [v5.0] 날짜가 바뀌면 goalCelebrationShown 가드를 리셋하여
+     다음날 목표 달성 시에도 세레머니가 재발동하도록 한다. */
+  function _checkDateRollover() {
+    const todayKey = new Date().toDateString();
+    const lastKey  = localStorage.getItem('fable_goal_celebration_date');
+    if (lastKey !== todayKey) {
+      localStorage.setItem('fable_goal_celebration_date', todayKey);
+      GoalCelebration.resetDailyGuard();
+    }
+  }
+
   function startSession() {
     store.readingSession.startTime = Date.now();
+    _checkDateRollover();
     clearInterval(timer);
     timer = setInterval(() => {
       if (document.visibilityState === 'visible') {
@@ -922,6 +1244,8 @@ const ReadingStatsTracker = (() => {
     if (pct >= 100 && fill.dataset.notified !== '1') {
       fill.dataset.notified = '1';
       Toast.show('🎉 오늘의 독서 목표를 달성했습니다!', 'success');
+      /* [v5.0] 앰버 파티클 세레머니 — 효과음 + 햅틱 + 진행 바 파티클 버스트 */
+      GoalCelebration.celebrate();
     }
   }
 
@@ -1503,6 +1827,8 @@ export {
   OnboardingGuide,
   ReadingReport,
   PageTransitionEngine,
+  QuickSettingsPopover,
+  GoalCelebration,
   TTSSystem,
   ReadingStatsTracker,
   initContextMenu,

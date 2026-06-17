@@ -1,5 +1,5 @@
 /**
- * src/reader.js  ── Fable Premium v4.1
+ * src/reader.js  ── Fable Premium v5.0
  * ─────────────────────────────────────────────────────────────────
  * EpubReader 샌드박스 바인딩 + jszip/epubjs 런타임 가드 레이어
  *
@@ -15,6 +15,12 @@
  *   [3D 전환] fade | slide | flip3d 옵션
  *   [이미지] 다크 모드 35% 드롭 스마트 필터
  *   [E-Ink] fontWeightBoost / contrastScale 강제 보정 레이어
+ *
+ * [v5.0 설정 UI/UX 대개혁]
+ *   injectContentStyles(): store.hyphenateKorean === true 일 때
+ *   text-align: justify + hyphens: auto 보정 CSS를 본문 iframe에 주입.
+ *   한글은 word-break: keep-all을 유지한 채 양쪽 정렬만 보강하며,
+ *   라틴 문자 혼용 구간에서 hyphens 속성이 보조적으로 작동한다.
  *
  * [버그 수정 v4.1]
  *   allowScriptedContent: true — iframe sandbox 'allow-scripts' 명시 부여
@@ -81,6 +87,10 @@ const deps = {
   refreshLibraryData:  async () => {},
   handleKeyDown:       () => {},
   bindScrollTopButton: () => {},
+  /* [v5.0] 뷰어 본문 탭(Tap) 시 QuickSettingsPopover 동기화 콜백.
+     main.js가 registerReaderDeps()로 viewer.js의 QuickSettingsPopover를
+     주입한다. 기본값은 no-op이므로 주입 전에도 안전하게 동작한다. */
+  onViewerTap:         () => {},
 };
 
 export function registerReaderDeps(overrides) {
@@ -757,6 +767,21 @@ export function injectContentStyles(contents) {
 
   const imgFilter = isDark ? 'filter: brightness(0.65) contrast(0.9);' : '';
 
+  /* [v5.0] 한국어 하이픈 / 양쪽 정렬 보정
+     — hyphenateKorean이 true일 때 text-align: justify + 균등 분배 보정을
+       적용하여 본문 우측 여백의 들쭉날쭉함을 줄인다. 한글은 음절 단위
+       줄바꿈(word-break: keep-all)이 기본이므로 CSS hyphens 속성은
+       라틴 문자 혼용 구간에만 보조적으로 작용한다. */
+  const hyphenCss = store.hyphenateKorean
+    ? `
+      text-align:      justify !important;
+      text-justify:     inter-word;
+      hyphens:           auto;
+      -webkit-hyphens:   auto;
+      word-break:        keep-all;
+    `
+    : '';
+
   style.textContent = `
     html, body {
       background:      ${themeBg}         !important;
@@ -769,6 +794,7 @@ export function injectContentStyles(contents) {
       word-break:      keep-all;
       overflow-wrap:   break-word;
       ${filterVal ? `filter: ${filterVal};` : ''}
+      ${hyphenCss}
     }
     p, li, blockquote { margin-bottom: 0.6em; }
     h1, h2, h3, h4 {
@@ -872,6 +898,10 @@ export function initRenditionEngine(book) {
     if (store.isTocOpen)      store.isTocOpen     = false;
     if (store.isSettingsOpen) store.isSettingsOpen = false;
     store.navBarsVisible = !store.navBarsVisible;
+    /* [v5.0] 맥락형 빠른 설정 팝오버 — 상하단 바와 표시 상태를 동기화한다.
+       바가 나타날 때 팝오버도 열리고, 바가 숨겨질 때 팝오버도 함께 닫혀
+       독서 흐름을 방해하지 않는다. */
+    deps.onViewerTap(store.navBarsVisible);
   });
   rendition.on('rendered', (section, view) => {
     if (view?.document) injectContentStyles({ document: view.document });

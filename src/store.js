@@ -1,9 +1,20 @@
 /**
- * src/store.js  ── Fable Premium v4.0
+ * src/store.js  ── Fable Premium v5.0
  * ─────────────────────────────────────────────────────────────────
  * 순수 전역 상태 엔진 (SRP 준수)
  *
- * 변경 사항 (v4.0):
+ * 변경 사항 (v5.0 — 설정 UI/UX 대개혁):
+ *   [맥락형 빠른 설정 팝오버]  quickPopoverOpen — 뷰어 탭(Tap) 시 노출되는
+ *     글래스모피즘 팝오버의 표시 상태. navBarsVisible과 분리된 독립 상태.
+ *   [독서 프로필 / 비주얼 프리셋]  readingProfile — 'comfortable' | 'dense' | 'large'
+ *     프리셋 선택 시 fontSize/lineHeight/userSpacing 등을 일괄 동기화하는 식별자.
+ *     사용자가 개별 슬라이더를 직접 조작하면 'custom-profile'로 전환된다.
+ *   [심화 설정 — 자동 태깅]      autoTaggingEnabled — 도서 임포트 시 장르 자동 추론 스위치.
+ *   [심화 설정 — 인사이트 주기]  insightSummaryInterval — 'daily' | 'weekly'.
+ *   [한국어 하이픈/정렬]         hyphenateKorean — true 시 본문에 hyphens/text-align 보정 적용.
+ *   [목표 달성 세레머니]         goalCelebrationShown — 당일 목표 100% 달성 1회성 트리거 가드.
+ *
+ * 변경 사항 (v4.0 — 유지):
  *   - LZ-String 기반 인라인 압축 엔진 (LZStore) 추가
  *     → lsSet/lsGet에서 QuotaExceededError 발생 시 구형 LRU 삭제 대신 압축 보존
  *   - CRDT 상태 키 추가 (crdtVectorClock)
@@ -26,6 +37,40 @@
    §0. 상수
    ══════════════════════════════════════════════════════════════════ */
 export const LH_MAP     = { narrow: '1.5', normal: '1.85', wide: '2.3' };
+
+/**
+ * [v5.0 신규] 독서 프로필(Visual Presets) 정의
+ * 프리셋 클릭 시 fontSize / lineHeight / userSpacing / fontWeightBoost를
+ * 한 번에 ReactiveStore에 동기화하기 위한 단일 진실 공급원(Single Source of Truth).
+ * settings.js / viewer.js 양쪽에서 동일 테이블을 참조한다.
+ */
+export const READING_PROFILES = {
+  comfortable: {
+    label:           '편안한 읽기',
+    description:     '여유로운 줄 간격과 표준 글자 크기로 장시간 독서에 최적화',
+    fontSize:        100,
+    lineHeight:      'wide',
+    userSpacing:     0.02,
+    fontWeightBoost: 0,
+  },
+  dense: {
+    label:           '밀도 높은 읽기',
+    description:     '좁은 줄 간격과 여백 축소로 한 화면에 더 많은 텍스트 표시',
+    fontSize:        92,
+    lineHeight:      'narrow',
+    userSpacing:     -0.01,
+    fontWeightBoost: 0,
+  },
+  large: {
+    label:           '대형 활자',
+    description:     '확대된 글자 크기와 두꺼운 굵기로 가독성 극대화',
+    fontSize:        135,
+    lineHeight:      'wide',
+    userSpacing:     0.01,
+    fontWeightBoost: 100,
+  },
+};
+
 export const STATE_KEY  = 'fable_v3_state';
 export const SYNC_TAG   = 'fable-annotation-sync';
 export const DB_NAME    = 'FableV3DB';
@@ -322,6 +367,35 @@ export const ReactiveStore = (() => {
 
     /* [스크러버 미리보기] hover 위치 퍼센트 (-1 = 비활성) */
     scrubberHoverPct: -1,
+
+    /* ────────────────────────────────────────────────────────────
+       v5.0 신규 런타임 상태 — 설정 UI/UX 대개혁
+       ──────────────────────────────────────────────────────────── */
+
+    /* [맥락형 빠른 설정 팝오버] 뷰어 본문 탭(Tap) 시 노출되는
+       글래스모피즘 팝오버의 표시 여부. navBarsVisible(상하단 바)과는
+       독립적으로 제어되며, 팝오버 활성 중 본문 재탭 시 닫힌다. */
+    quickPopoverOpen: false,
+
+    /* [독서 프로필] 'comfortable' | 'dense' | 'large' | 'custom-profile'
+       프리셋 선택 시 settings.js의 ReadingProfilePresets가 fontSize 등
+       관련 키를 일괄 동기화한다. 사용자가 개별 슬라이더를 직접 조작하면
+       'custom-profile'로 전환되어 프리셋 버튼의 active 표시가 해제된다. */
+    readingProfile: 'comfortable',
+
+    /* [심화 설정] 도서 임포트 시 장르 자동 태깅 추론 활성 여부 */
+    autoTaggingEnabled: true,
+
+    /* [심화 설정] 독서 인사이트 요약 카드 갱신 주기 — 'daily' | 'weekly' */
+    insightSummaryInterval: 'weekly',
+
+    /* [한국어 최적화] 본문 하이픈/줄 정렬(text-align: justify + hyphens) 활성 여부 */
+    hyphenateKorean: false,
+
+    /* [목표 달성 세레머니] 당일 목표 100% 달성 알림이 이미 트리거되었는지
+       여부 — ReadingStatsTracker._updateUI의 1회성 가드와 별개로,
+       GoalCelebration 파티클 애니메이션 자체의 중복 실행을 차단한다. */
+    goalCelebrationShown: false,
 
     /* ── IndexedDB 레퍼런스 ── */
     indexedDB: null,

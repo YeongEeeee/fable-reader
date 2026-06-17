@@ -3,14 +3,23 @@
  * ───────────────────────────────────────────────────────────────────
  * 공용 설정 UI (서재/뷰어 양쪽에서 사용)
  *
- * v5.0 대개혁 신규 사항:
- *   [❸-태그관리] 태그 관리 섹션 신설
- *     A) 커스텀 태그 생성기 (<input> + [태그 생성] 버튼)
- *     B) store.tags 배열 push → 3-Way 리액티브 바인딩
- *     C) 장르 태그 칩 미리보기 (GENRE_TAGS 컬러 브랜딩)
- *   [❶-HUD스위치] showDashboardReport 토글 스위치 렌더링 세그먼트
- *     → store.showDashboardReport 리액티브 연동
+ * v5.0 설정 UI/UX 대개혁 — 2단계 계층 구조:
+ *   [❶-독서 프로필] ReadingProfilePresets — '편안한 읽기'/'밀도 높은 읽기'/'대형 활자'
+ *     3종 썸네일 버튼. 클릭 시 store.READING_PROFILES 테이블 기준으로
+ *     fontSize/lineHeight/userSpacing/fontWeightBoost를 한 번에 동기화.
+ *   [❷-심화 설정] AdvancedSettingsSection — 자주 건드리지 않는 설정을
+ *     뷰어 팝오버에서 분리하여 이 패널로 위임:
+ *       A) [자동 태깅 활성화] 스위치 (autoTaggingEnabled)
+ *       B) [인사이트 요약 주기] 일간/주간 세그먼트 컨트롤 (insightSummaryInterval)
+ *       C) [한국어 하이픈/줄 정렬] 토글 (hyphenateKorean)
+ *   [❸-태그관리] 태그 관리 섹션 (유지)
+ *   [❶-HUD스위치] showDashboardReport 토글 스위치 렌더링 세그먼트 (유지)
  *   [v5.0 FX] initFxSettingsUI(): 비주얼 특수효과 제어 섹션 (유지)
+ *
+ * ※ 뷰어 내 자주 쓰는 설정(테마/글자크기/넘김모드)은 ui/viewer.js의
+ *   QuickSettingsPopover로 분리되었다. 이 파일은 "한 번 설정하면 잘
+ *   건드리지 않는" 설정 패널 전용이며, viewer.js를 import하지 않는다
+ *   (순환 참조 차단 — uploader.js와 동일한 단방향 규칙 적용).
  *
  * 변경 사항 (v4.0 — 유지):
  *   - fontWeightBoost / contrastScale / eyeProtectMinutes / pageTransition
@@ -23,6 +32,7 @@
 
 import {
   store, ReactiveStore, DOMProxy, Toast, setTextSafe, STATE_KEY,
+  READING_PROFILES,
 } from '../store.js';
 import { AnnotationSyncEngine } from '../sync.js';
 import { injectCustomToIframe, reapplyInlineTheme, waitForFontsWithTimeout } from '../reader.js';
@@ -298,6 +308,11 @@ function _saveStateToLS() {
     tags:                 store.tags                 ?? [],
     libraryViewMode:      store.libraryViewMode      ?? 'grid',
     dailyGoalMin:         store.dailyGoalMin         ?? 30,
+    /* v5.0 설정 UI 대개혁 */
+    readingProfile:         store.readingProfile         ?? 'comfortable',
+    autoTaggingEnabled:     store.autoTaggingEnabled     ?? true,
+    insightSummaryInterval: store.insightSummaryInterval ?? 'weekly',
+    hyphenateKorean:        store.hyphenateKorean        ?? false,
   };
   try { localStorage.setItem(STATE_KEY, JSON.stringify(snap)); } catch (_) {}
 }
@@ -330,6 +345,11 @@ function _loadStateFromLS() {
       tags:                 Array.isArray(s.tags) ? s.tags : [],
       libraryViewMode:      s.libraryViewMode      ?? 'grid',
       dailyGoalMin:         s.dailyGoalMin         ?? 30,
+      /* v5.0 설정 UI 대개혁 */
+      readingProfile:         s.readingProfile         ?? 'comfortable',
+      autoTaggingEnabled:     s.autoTaggingEnabled     ?? true,
+      insightSummaryInterval: s.insightSummaryInterval ?? 'weekly',
+      hyphenateKorean:        s.hyphenateKorean        ?? false,
     });
   } catch (_) {}
 }
@@ -486,6 +506,370 @@ function _mountFxSection() {
 function initFxSettingsUI() {
   _mountFxSection();
   applyFxState();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §34-A. [v5.0 신규] 독서 프로필 / 비주얼 프리셋
+   ─────────────────────────────────────────────────────────────────
+   '편안한 읽기' / '밀도 높은 읽기' / '대형 활자' 3종 썸네일 버튼.
+   클릭 시 READING_PROFILES 테이블을 기준으로 fontSize, lineHeight,
+   userSpacing, fontWeightBoost를 ReactiveStore.patch()로 한 번에 동기화한다.
+   사용자가 개별 슬라이더(폰트 굵기 보정 등)를 직접 조작하면
+   store.readingProfile이 'custom-profile'로 전환되어 active 표시가 풀린다.
+   ══════════════════════════════════════════════════════════════════ */
+function _applyReadingProfile(profileId) {
+  const profile = READING_PROFILES[profileId];
+  if (!profile) return;
+
+  ReactiveStore.patch({
+    fontSize:        profile.fontSize,
+    lineHeight:       profile.lineHeight,
+    userSpacing:      profile.userSpacing,
+    fontWeightBoost:  profile.fontWeightBoost,
+    readingProfile:   profileId,
+  });
+
+  try { reapplyInlineTheme(); } catch (_) {}
+  _saveStateToLS();
+  Toast.show(`'${profile.label}' 프로필이 적용되었습니다.`, 'success');
+}
+
+function _renderProfileThumbnail(profileId, profile) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'profile-preset-card';
+  card.dataset.profile = profileId;
+  card.setAttribute('role', 'radio');
+  card.setAttribute('aria-checked', String(store.readingProfile === profileId));
+
+  /* 썸네일 미리보기 — 글자 크기/줄 간격 비율을 시각적으로 축약 표현 */
+  const thumb = document.createElement('div');
+  thumb.className = 'profile-preset-thumb';
+  thumb.style.cssText = `
+    --thumb-font-scale: ${(profile.fontSize / 100).toFixed(2)};
+    --thumb-line-gap: ${profile.lineHeight === 'narrow' ? '3px' : profile.lineHeight === 'wide' ? '8px' : '5px'};
+  `;
+  for (let i = 0; i < 4; i++) {
+    const bar = document.createElement('span');
+    bar.className = 'profile-preset-bar';
+    if (i === 3) bar.classList.add('profile-preset-bar--short');
+    thumb.appendChild(bar);
+  }
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'profile-preset-label';
+  labelEl.textContent = profile.label;
+
+  const descEl = document.createElement('span');
+  descEl.className = 'profile-preset-desc';
+  descEl.textContent = profile.description;
+
+  card.append(thumb, labelEl, descEl);
+  return card;
+}
+
+function _mountReadingProfileSection() {
+  if (DOMProxy.exists('reading-profile-section')) {
+    _bindReadingProfileSection();
+    return;
+  }
+
+  const panel = DOMProxy.get('settings-panel');
+  if (!panel || panel === DOMProxy.VOID_NODE) return;
+
+  const section = document.createElement('div');
+  section.id = 'reading-profile-section';
+  section.className = 'settings-section reading-profile-section';
+
+  const header = document.createElement('div');
+  header.className = 'settings-section-header';
+  const title = document.createElement('h3');
+  title.className = 'settings-section-title';
+  title.textContent = '📖 독서 프로필';
+  header.appendChild(title);
+  section.appendChild(header);
+
+  const grid = document.createElement('div');
+  grid.className = 'profile-preset-grid';
+  grid.setAttribute('role', 'radiogroup');
+  grid.setAttribute('aria-label', '독서 프로필 프리셋');
+
+  Object.entries(READING_PROFILES).forEach(([profileId, profile]) => {
+    grid.appendChild(_renderProfileThumbnail(profileId, profile));
+  });
+  section.appendChild(grid);
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .reading-profile-section { padding: 16px 20px 18px; border-top: 1px solid rgba(120,100,80,0.12); }
+    .profile-preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .profile-preset-card {
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+      padding: 12px 8px 10px; border-radius: 12px;
+      border: 1.5px solid rgba(120,100,80,0.18); background: rgba(255,255,255,0.4);
+      cursor: pointer; transition: border-color 0.18s ease, transform 0.15s ease, background 0.18s ease;
+      font-family: inherit;
+    }
+    [data-theme="dark"] .profile-preset-card { background: rgba(30,24,18,0.35); }
+    .profile-preset-card:hover { transform: translateY(-1px); border-color: var(--color-accent, #c8864a); }
+    .profile-preset-card[aria-checked="true"] {
+      border-color: var(--color-accent, #c8864a);
+      background: rgba(200,134,74,0.10);
+      box-shadow: 0 0 0 2px rgba(200,134,74,0.16);
+    }
+    .profile-preset-thumb {
+      width: 100%; height: 38px; display: flex; flex-direction: column;
+      gap: var(--thumb-line-gap, 5px); justify-content: center; padding: 0 6px;
+    }
+    .profile-preset-bar {
+      display: block; height: calc(3px * var(--thumb-font-scale, 1));
+      min-height: 2px; border-radius: 2px;
+      background: var(--color-ink-muted, #8a7a6a); opacity: 0.55; width: 100%;
+    }
+    .profile-preset-bar--short { width: 60%; }
+    .profile-preset-label { font-size: 12.5px; font-weight: 600; color: var(--color-ink, #1a1814); }
+    .profile-preset-desc  { font-size: 10.5px; color: var(--color-ink-muted, #8a7a6a); text-align: center; line-height: 1.35; }
+  `;
+  document.head.appendChild(style);
+
+  panel.appendChild(section);
+
+  _bindReadingProfileSection();
+}
+
+function _bindReadingProfileSection() {
+  const cards = DOMProxy.qa('.profile-preset-card');
+  if (!cards.length) return;
+
+  cards.forEach(card => {
+    card.addEventListener('click', () => {
+      _applyReadingProfile(card.dataset.profile);
+    });
+  });
+
+  function _syncActiveState(activeId) {
+    cards.forEach(card => {
+      const ok = card.dataset.profile === activeId;
+      card.setAttribute('aria-checked', String(ok));
+    });
+  }
+
+  _syncActiveState(store.readingProfile);
+  ReactiveStore.subscribe('readingProfile', (v) => _syncActiveState(v));
+
+  /* 사용자가 개별 폰트 굵기 슬라이더를 직접 조작하면 프리셋 동기화가
+     깨졌음을 알리기 위해 'custom-profile'로 전환한다. fontSize/lineHeight
+     자체는 뷰어 팝오버에서도 직접 바뀌므로 동일 가드를 적용한다. */
+  ['fontSize', 'lineHeight', 'userSpacing', 'fontWeightBoost'].forEach(key => {
+    ReactiveStore.subscribe(key, () => {
+      const profile = READING_PROFILES[store.readingProfile];
+      if (!profile) return;
+      const matches =
+        store.fontSize === profile.fontSize &&
+        store.lineHeight === profile.lineHeight &&
+        store.userSpacing === profile.userSpacing &&
+        store.fontWeightBoost === profile.fontWeightBoost;
+      if (!matches) store.readingProfile = 'custom-profile';
+    });
+  });
+}
+
+function initReadingProfileUI() {
+  _mountReadingProfileSection();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §34-B. [v5.0 신규] 심화 설정 섹션 (Advanced Settings)
+   ─────────────────────────────────────────────────────────────────
+   한 번 설정하면 잘 건드리지 않는 설정을 뷰어 팝오버에서 분리하여
+   이 패널로 위임:
+     A) [자동 태깅 활성화] 스위치 — autoTaggingEnabled
+     B) [인사이트 요약 주기] 일간/주간 세그먼트 — insightSummaryInterval
+     C) [한국어 하이픈/줄 정렬] 토글 — hyphenateKorean
+   ══════════════════════════════════════════════════════════════════ */
+function _mountAdvancedSettingsSection() {
+  if (DOMProxy.exists('advanced-settings-section')) {
+    _bindAdvancedSettingsSection();
+    return;
+  }
+
+  const panel = DOMProxy.get('settings-panel');
+  if (!panel || panel === DOMProxy.VOID_NODE) return;
+
+  const section = document.createElement('div');
+  section.id = 'advanced-settings-section';
+  section.className = 'settings-section advanced-settings-section';
+
+  const header = document.createElement('div');
+  header.className = 'settings-section-header';
+  const title = document.createElement('h3');
+  title.className = 'settings-section-title';
+  title.textContent = '🛠 심화 설정';
+  header.appendChild(title);
+  section.appendChild(header);
+
+  /* A) 자동 태깅 스위치 */
+  const taggingRow = document.createElement('label');
+  taggingRow.className = 'fx-toggle-row';
+  taggingRow.htmlFor = 'adv-toggle-auto-tagging';
+
+  const taggingText = document.createElement('div');
+  taggingText.className = 'fx-toggle-text';
+  const taggingLabel = document.createElement('span');
+  taggingLabel.className = 'fx-toggle-label';
+  taggingLabel.textContent = '자동 태깅 활성화';
+  const taggingDesc = document.createElement('span');
+  taggingDesc.className = 'fx-toggle-desc';
+  taggingDesc.textContent = '도서를 추가할 때 제목/메타데이터 기반으로 장르 태그를 자동 추론합니다.';
+  taggingText.append(taggingLabel, taggingDesc);
+
+  const taggingSwitchWrap = document.createElement('div');
+  taggingSwitchWrap.className = 'fx-toggle-switch-wrap';
+  const taggingCheckbox = document.createElement('input');
+  taggingCheckbox.type = 'checkbox';
+  taggingCheckbox.id = 'adv-toggle-auto-tagging';
+  taggingCheckbox.className = 'fx-toggle-checkbox';
+  taggingCheckbox.checked = store.autoTaggingEnabled !== false;
+  const taggingTrack = document.createElement('span');
+  taggingTrack.className = 'fx-toggle-track';
+  taggingTrack.setAttribute('aria-hidden', 'true');
+  taggingSwitchWrap.append(taggingCheckbox, taggingTrack);
+
+  taggingRow.append(taggingText, taggingSwitchWrap);
+  section.appendChild(taggingRow);
+
+  /* B) 인사이트 요약 주기 세그먼트 */
+  const intervalRow = document.createElement('div');
+  intervalRow.className = 'adv-segment-row';
+  intervalRow.setAttribute('role', 'group');
+  intervalRow.setAttribute('aria-label', '인사이트 요약 주기');
+
+  const intervalLabelWrap = document.createElement('div');
+  intervalLabelWrap.className = 'fx-toggle-text';
+  const intervalLabel = document.createElement('span');
+  intervalLabel.className = 'fx-toggle-label';
+  intervalLabel.textContent = '인사이트 요약 주기';
+  const intervalDesc = document.createElement('span');
+  intervalDesc.className = 'fx-toggle-desc';
+  intervalDesc.textContent = '서재 하단 HUD 인사이트 카드의 데이터 집계 단위를 설정합니다.';
+  intervalLabelWrap.append(intervalLabel, intervalDesc);
+
+  const segmentControl = document.createElement('div');
+  segmentControl.className = 'adv-segment-control';
+  segmentControl.setAttribute('role', 'radiogroup');
+
+  const segments = [
+    { value: 'daily',  label: '일간' },
+    { value: 'weekly', label: '주간' },
+  ];
+  segments.forEach(({ value, label }) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ctrl-btn ctrl-btn--text adv-segment-btn';
+    btn.dataset.interval = value;
+    btn.textContent = label;
+    btn.setAttribute('role', 'radio');
+    segmentControl.appendChild(btn);
+  });
+
+  intervalRow.append(intervalLabelWrap, segmentControl);
+  section.appendChild(intervalRow);
+
+  /* C) 한국어 하이픈/줄 정렬 토글 */
+  const hyphenRow = document.createElement('label');
+  hyphenRow.className = 'fx-toggle-row';
+  hyphenRow.htmlFor = 'adv-toggle-hyphenate';
+
+  const hyphenText = document.createElement('div');
+  hyphenText.className = 'fx-toggle-text';
+  const hyphenLabel = document.createElement('span');
+  hyphenLabel.className = 'fx-toggle-label';
+  hyphenLabel.textContent = '한국어 하이픈 / 양쪽 정렬';
+  const hyphenDesc = document.createElement('span');
+  hyphenDesc.className = 'fx-toggle-desc';
+  hyphenDesc.textContent = '본문 우측 여백 들쭉날쭉함을 줄이기 위해 자동 줄바꿈 보정을 적용합니다.';
+  hyphenText.append(hyphenLabel, hyphenDesc);
+
+  const hyphenSwitchWrap = document.createElement('div');
+  hyphenSwitchWrap.className = 'fx-toggle-switch-wrap';
+  const hyphenCheckbox = document.createElement('input');
+  hyphenCheckbox.type = 'checkbox';
+  hyphenCheckbox.id = 'adv-toggle-hyphenate';
+  hyphenCheckbox.className = 'fx-toggle-checkbox';
+  hyphenCheckbox.checked = store.hyphenateKorean === true;
+  const hyphenTrack = document.createElement('span');
+  hyphenTrack.className = 'fx-toggle-track';
+  hyphenTrack.setAttribute('aria-hidden', 'true');
+  hyphenSwitchWrap.append(hyphenCheckbox, hyphenTrack);
+
+  hyphenRow.append(hyphenText, hyphenSwitchWrap);
+  section.appendChild(hyphenRow);
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .advanced-settings-section { padding: 16px 20px 18px; border-top: 1px solid rgba(120,100,80,0.12); }
+    .adv-segment-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(120,100,80,0.07); }
+    .adv-segment-control { display: inline-flex; gap: 6px; flex-shrink: 0; }
+    .adv-segment-btn { padding: 6px 14px; font-size: 12.5px; }
+  `;
+  document.head.appendChild(style);
+
+  panel.appendChild(section);
+
+  _bindAdvancedSettingsSection();
+}
+
+function _bindAdvancedSettingsSection() {
+  /* A) 자동 태깅 */
+  const taggingCheckbox = DOMProxy.get('adv-toggle-auto-tagging');
+  if (taggingCheckbox && taggingCheckbox !== DOMProxy.VOID_NODE) {
+    taggingCheckbox.checked = store.autoTaggingEnabled !== false;
+    taggingCheckbox.addEventListener('change', () => {
+      store.autoTaggingEnabled = taggingCheckbox.checked;
+      _saveStateToLS();
+      Toast.show(
+        taggingCheckbox.checked ? '자동 태깅이 활성화되었습니다.' : '자동 태깅이 비활성화되었습니다.',
+        'info'
+      );
+    });
+    ReactiveStore.subscribe('autoTaggingEnabled', (v) => { taggingCheckbox.checked = (v !== false); });
+  }
+
+  /* B) 인사이트 요약 주기 */
+  const intervalBtns = DOMProxy.qa('.adv-segment-btn');
+  if (intervalBtns.length) {
+    function _syncIntervalBtns(cur) {
+      intervalBtns.forEach(b => {
+        const ok = b.dataset.interval === cur;
+        b.classList.toggle('active', ok);
+        b.setAttribute('aria-checked', String(ok));
+      });
+    }
+    _syncIntervalBtns(store.insightSummaryInterval || 'weekly');
+    intervalBtns.forEach(b => {
+      b.addEventListener('click', () => {
+        store.insightSummaryInterval = b.dataset.interval;
+        _saveStateToLS();
+      });
+    });
+    ReactiveStore.subscribe('insightSummaryInterval', (v) => _syncIntervalBtns(v));
+  }
+
+  /* C) 한국어 하이픈/정렬 */
+  const hyphenCheckbox = DOMProxy.get('adv-toggle-hyphenate');
+  if (hyphenCheckbox && hyphenCheckbox !== DOMProxy.VOID_NODE) {
+    hyphenCheckbox.checked = store.hyphenateKorean === true;
+    hyphenCheckbox.addEventListener('change', () => {
+      store.hyphenateKorean = hyphenCheckbox.checked;
+      _saveStateToLS();
+      try { reapplyInlineTheme(); } catch (_) {}
+    });
+    ReactiveStore.subscribe('hyphenateKorean', (v) => { hyphenCheckbox.checked = (v === true); });
+  }
+}
+
+function initAdvancedSettingsUI() {
+  _mountAdvancedSettingsSection();
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -728,6 +1112,10 @@ function initV4SettingsUI() {
   initContrastScaleSlider();
   initEyeProtectMinutesInput();
   initPageTransitionSelector();
+  /* v5.0 독서 프로필 프리셋 */
+  initReadingProfileUI();
+  /* v5.0 심화 설정 섹션 (자동 태깅 / 인사이트 주기 / 하이픈) */
+  initAdvancedSettingsUI();
   /* v5.0 FX 제어 패널 */
   initFxSettingsUI();
   /* v5.0 태그 관리 섹션 */
@@ -757,4 +1145,6 @@ export {
   initFxSettingsUI,
   initTagManagementUI,
   initDashboardHudToggleUI,
+  initReadingProfileUI,
+  initAdvancedSettingsUI,
 };

@@ -38,6 +38,14 @@
  *     (뷰어 화면에서만 활성, store.fxZenMode=false 시 완전 비활성)
  *   - _forceSyncSettingsUI(): FX 체크박스 동기화 확장
  *   - applyFxState import 및 부팅 시 즉시 적용
+ *
+ * [v5.0 설정 UI/UX 대개혁]
+ *   - registerReaderDeps에 onViewerTap 콜백 추가 — reader.js의 rendition
+ *     click 핸들러(navBarsVisible 토글)와 QuickSettingsPopover를 동기화.
+ *     상하단 바가 나타날 때 팝오버도 함께 열리고, 숨겨질 때 함께 닫힌다.
+ *   - handleKeyDown Escape 체인 최우선 분기에 quickPopoverOpen 닫기 추가.
+ *   - mountReactiveBinders: isViewerOpen=false 구독 시 팝오버 강제 닫기
+ *     (서재 화면 복귀 후 팝오버 잔존 방지).
  * ───────────────────────────────────────────────────────────────────
  */
 
@@ -75,6 +83,7 @@ import {
   AnnotationManager, initContextMenu, TTSSystem, bindScrollTopButton,
   MetadataEditor, AnnotationExporter, LibraryFullTextSearch, CloudBackup, Pomodoro,
   ReadingReport, OnboardingGuide,
+  QuickSettingsPopover, // <-- v5.0 맥락형 빠른 설정 팝오버
 } from './ui/viewer.js';
 
 import {
@@ -123,6 +132,7 @@ function handleKeyDown(e) {
       if (_isSearchActive()) return;
       e.preventDefault(); NavGuard.prev(); break;
     case 'Escape':
+      if (store.quickPopoverOpen) { QuickSettingsPopover.close(); break; }
       if (store.isSettingsOpen) { store.isSettingsOpen = false; break; }
       if (store.isTocOpen)      { store.isTocOpen      = false; break; }
       if (DOMProxy.get('search-modal')?.style.display === 'flex') {
@@ -158,6 +168,12 @@ registerReaderDeps({
   refreshLibraryData,
   handleKeyDown,
   bindScrollTopButton,
+  /* [v5.0] 뷰어 본문 탭 시 navBarsVisible과 QuickSettingsPopover 동기화.
+     바가 나타나면(visible=true) 팝오버를 열고, 숨겨지면 닫는다. */
+  onViewerTap: (navBarsVisible) => {
+    if (navBarsVisible) QuickSettingsPopover.open();
+    else QuickSettingsPopover.close();
+  },
 });
 
 /* ══════════════════════════════════════════════════════════════════
@@ -320,6 +336,12 @@ function mountReactiveBinders() {
       DOMProxy.get('viewer-nav-bar').classList.toggle('nav-hidden', !visible);
     if (DOMProxy.exists('viewer-bottom-bar'))
       DOMProxy.get('viewer-bottom-bar').classList.toggle('bottom-hidden', !visible);
+  });
+
+  /* [v5.0] 뷰어 종료 시 맥락형 빠른 설정 팝오버 강제 닫기
+     — 서재 화면으로 복귀했는데 팝오버가 잔존하는 현상 방지 */
+  ReactiveStore.subscribe('isViewerOpen', (open) => {
+    if (!open && store.quickPopoverOpen) QuickSettingsPopover.close();
   });
 
   ReactiveStore.subscribe('isTocOpen', (open) => {
