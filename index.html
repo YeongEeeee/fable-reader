@@ -86,28 +86,19 @@
     <!-- ══ 서재 본문 영역 ══ -->
     <div class="library-body" id="library-body">
 
-      <!-- [1]-4 독서 분석 대시보드 -->
-      <section id="dashboard-section" class="dashboard-section" aria-label="독서 분석 대시보드"></section>
-
-      <!-- [요구2-최상단] 최근 읽은 책 -->
-      <section id="recent-section" class="recent-section" style="display:none;" aria-label="최근 읽은 책">
-        <h2 class="library-section-title">최근 읽은 책</h2>
-        <div id="recent-row" class="recent-row" role="list" aria-label="최근 읽은 책 목록"></div>
-      </section>
-
-      <!-- [요구2-중단] 내 폴더 관리 바 -->
+      <!-- [요구3-1] 내 폴더 관리 바 -->
       <section class="folder-section" aria-label="내 폴더">
         <h2 class="library-section-title">내 폴더</h2>
         <div id="folder-bar" class="folder-bar" role="tablist" aria-label="폴더 필터"></div>
       </section>
 
-      <!-- [1]-6 스마트 태그 + 정렬 -->
+      <!-- [요구3-2] 스마트 태그 + 정렬 -->
       <section class="tag-section" aria-label="태그 필터 및 정렬">
         <h2 class="library-section-title">태그 · 정렬</h2>
         <div id="tag-bar" class="tag-bar" role="group" aria-label="태그 필터"></div>
       </section>
 
-      <!-- 서재 타이틀 -->
+      <!-- [요구3-3] 서재 타이틀 -->
       <div class="library-header-row">
         <h2 class="library-section-title">내 서재</h2>
         <span class="library-count" id="library-count" aria-live="polite"></span>
@@ -128,6 +119,15 @@
         <p class="empty-desc">상단의 '도서 추가' 버튼으로 EPUB 파일을 추가하세요</p>
         <p class="empty-desc">여러 파일을 한번에 선택하거나 드래그할 수 있습니다</p>
       </div>
+
+      <!-- [요구3-4] 최근 읽은 책 -->
+      <section id="recent-section" class="recent-section" style="display:none;" aria-label="최근 읽은 책">
+        <h2 class="library-section-title">최근 읽은 책</h2>
+        <div id="recent-row" class="recent-row" role="list" aria-label="최근 읽은 책 목록"></div>
+      </section>
+
+      <!-- [요구3-5] 독서 분석 대시보드 (HUD 표시 영역) -->
+      <section id="dashboard-section" class="dashboard-section" aria-label="독서 분석 대시보드"></section>
 
       <!-- 드래그앤드롭 힌트 (빈 서재일 때 하단 표시) -->
       <div id="drop-hint" class="drop-hint" aria-hidden="true">

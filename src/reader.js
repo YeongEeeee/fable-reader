@@ -893,7 +893,7 @@ export function initRenditionEngine(book) {
     NavGuard.onRelocated(location);
   });
 
-  rendition.on('keyup', deps.handleKeyDown);
+  rendition.on('keydown', deps.handleKeyDown);
   rendition.on('click', () => {
     if (store.isTocOpen)      store.isTocOpen     = false;
     if (store.isSettingsOpen) store.isSettingsOpen = false;
@@ -970,7 +970,7 @@ export async function destroyCurrentRenditionContext() {
     const r = store.rendition;
 
     const RENDITION_EVENTS = [
-      'relocated', 'keyup', 'click', 'rendered', 'displayed',
+      'relocated', 'keydown', 'click', 'rendered', 'displayed',
       'started', 'attached', 'removed', 'resized', 'orientationchange',
     ];
     for (const ev of RENDITION_EVENTS) {

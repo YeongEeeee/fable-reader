@@ -397,6 +397,11 @@ export const ReactiveStore = (() => {
        GoalCelebration 파티클 애니메이션 자체의 중복 실행을 차단한다. */
     goalCelebrationShown: false,
 
+    /* [서재 하단 HUD] 독서 분석 대시보드(주간 추이/목표 달성률/인사이트)
+       표시 여부. settings.js의 hud-toggle-checkbox와 양방향 연동되며,
+       main.js의 리액티브 바인더가 #dashboard-section의 display를 제어한다. */
+    showDashboardReport: true,
+
     /* ── IndexedDB 레퍼런스 ── */
     indexedDB: null,
   };

@@ -439,6 +439,15 @@ function mountReactiveBinders() {
     }
   });
 
+  /* [v5.0 버그 수정] 독서 리포트 HUD 표시 토글 — 이전에는 store 값만
+     바뀌고 실제 #dashboard-section의 표시 여부를 제어하는 구독자가
+     없어 토글이 화면에 아무 영향도 주지 못했다. 여기서 실제 DOM
+     반영을 담당한다. */
+  ReactiveStore.subscribe('showDashboardReport', (visible) => {
+    if (DOMProxy.exists('dashboard-section'))
+      DOMProxy.get('dashboard-section').style.display = (visible === false) ? 'none' : '';
+  });
+
   ReactiveStore.subscribe('ttsVoice', (voiceURI) => {
     const sel = DOMProxy.get('tts-voice-select');
     if (sel && sel !== DOMProxy.VOID_NODE) sel.value = voiceURI || '';
@@ -550,11 +559,11 @@ function initButtonEventHandlers() {
     });
   }
 
-  /* ── 페이지 이동 ── */
-  if (DOMProxy.exists('btn-prev-page'))
-    DOMProxy.get('btn-prev-page').addEventListener('click', () => NavGuard.prev());
-  if (DOMProxy.exists('btn-next-page'))
-    DOMProxy.get('btn-next-page').addEventListener('click', () => NavGuard.next());
+  /* ── 페이지 이동 (실제 DOM ID: arrow-prev / arrow-next) ── */
+  if (DOMProxy.exists('arrow-prev'))
+    DOMProxy.get('arrow-prev').addEventListener('click', () => NavGuard.prev());
+  if (DOMProxy.exists('arrow-next'))
+    DOMProxy.get('arrow-next').addEventListener('click', () => NavGuard.next());
 
   /* ── 폰트 크기 ── */
   if (DOMProxy.exists('btn-font-decrease')) {
@@ -893,6 +902,12 @@ function _forceSyncSettingsUI() {
 
   /* [v5.0] FX 어트리뷰트 즉시 적용 */
   applyFxState();
+
+  /* [v5.0 버그 수정] 독서 리포트 HUD 표시 상태 부팅 시 즉시 동기화
+     — ReactiveStore.subscribe는 향후 변경에만 반응하므로, 부팅 시점의
+     초기 값은 명시적으로 한 번 적용해야 한다. */
+  if (DOMProxy.exists('dashboard-section'))
+    DOMProxy.get('dashboard-section').style.display = (store.showDashboardReport === false) ? 'none' : '';
 }
 
 /* ══════════════════════════════════════════════════════════════════
