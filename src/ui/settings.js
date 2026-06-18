@@ -303,6 +303,9 @@ function _saveStateToLS() {
     fxAnimation:          store.fxAnimation          ?? true,
     fxBlur:               store.fxBlur              ?? true,
     fxZenMode:            store.fxZenMode            ?? true,
+    /* [버그 수정 — C-6] 젠 모드 진입 타이밍 커스텀 제어 — 사용자가
+       설정 패널에서 선택한 비활동 감지 시간(초)을 저장한다. */
+    zenIdleDelaySec:      store.zenIdleDelaySec      ?? 2,
     /* v5.0 서재 */
     showDashboardReport:  store.showDashboardReport  ?? true,
     tags:                 store.tags                 ?? [],
@@ -340,6 +343,8 @@ function _loadStateFromLS() {
       fxAnimation:          s.fxAnimation          ?? true,
       fxBlur:               s.fxBlur              ?? true,
       fxZenMode:            s.fxZenMode            ?? true,
+      /* [버그 수정 — C-6] 저장된 사용자 젠 모드 진입 타이밍 복원 */
+      zenIdleDelaySec:      s.zenIdleDelaySec      ?? 2,
       /* v5.0 서재 */
       showDashboardReport:  s.showDashboardReport  ?? true,
       tags:                 Array.isArray(s.tags) ? s.tags : [],
@@ -402,6 +407,7 @@ function _mountFxSection() {
     _bindFxToggle('fx-toggle-animation', 'fxAnimation');
     _bindFxToggle('fx-toggle-blur',      'fxBlur');
     _bindFxToggle('fx-toggle-zen',       'fxZenMode');
+    _bindZenIdleDelaySlider();
     return;
   }
 
@@ -423,7 +429,7 @@ function _mountFxSection() {
   const items = [
     { id: 'fx-toggle-animation', storeKey: 'fxAnimation', label: '애니메이션 및 페이지 전환 효과',  description: '3D 플립, 페이드, 팝업 트랜지션을 활성화합니다.' },
     { id: 'fx-toggle-blur',      storeKey: 'fxBlur',      label: '글래스모피즘 및 백드롭 블러 효과', description: '상하단 바에 반투명 블러 배경을 적용합니다. 저사양 기기에서는 끄면 성능이 향상됩니다.' },
-    { id: 'fx-toggle-zen',       storeKey: 'fxZenMode',   label: '몰입형 젠 모드 (자동 UI 숨김)',    description: '2초간 조작이 없으면 상하단 바를 자동으로 숨깁니다.' },
+    { id: 'fx-toggle-zen',       storeKey: 'fxZenMode',   label: '몰입형 젠 모드 (자동 UI 숨김)',    description: '조작이 없으면 일정 시간 후 상하단 바를 자동으로 숨깁니다. 아래에서 진입 시간을 조절할 수 있습니다.' },
   ];
 
   items.forEach(item => {
@@ -456,6 +462,41 @@ function _mountFxSection() {
     row.append(textGroup, switchWrap);
     section.appendChild(row);
   });
+
+  /*
+   * [버그 수정 — C-6] 젠 모드 진입 타이밍 커스텀 슬라이더
+   * ─────────────────────────────────────────────────────────────
+   * 1~10초 범위에서 사용자가 직접 비활동 감지 시간을 조절할 수
+   * 있도록 한다. fxZenMode 토글이 꺼져 있을 때는 슬라이더를
+   * 비활성화(disabled) 상태로 시각적으로 표시해 설정이 무의미함을
+   * 알린다.
+   */
+  const zenDelayRow = document.createElement('div');
+  zenDelayRow.id = 'zen-idle-delay-row';
+  zenDelayRow.className = 'adv-segment-row';
+
+  const zenDelayText = document.createElement('div');
+  zenDelayText.className = 'fx-toggle-text';
+  const zenDelayLabel = document.createElement('span');
+  zenDelayLabel.className = 'fx-toggle-label';
+  zenDelayLabel.textContent = '젠 모드 진입 시간';
+  const zenDelayDesc = document.createElement('span');
+  zenDelayDesc.className = 'fx-toggle-desc';
+  zenDelayDesc.id = 'zen-idle-delay-desc';
+  zenDelayDesc.textContent = `${store.zenIdleDelaySec ?? 2}초간 조작이 없으면 상하단 바를 숨깁니다.`;
+  zenDelayText.append(zenDelayLabel, zenDelayDesc);
+
+  const zenDelaySlider = document.createElement('input');
+  zenDelaySlider.type = 'range';
+  zenDelaySlider.id = 'input-zen-idle-delay';
+  zenDelaySlider.min = '1';
+  zenDelaySlider.max = '10';
+  zenDelaySlider.step = '1';
+  zenDelaySlider.value = String(store.zenIdleDelaySec ?? 2);
+  zenDelaySlider.style.cssText = 'flex-shrink:0; width:120px;';
+
+  zenDelayRow.append(zenDelayText, zenDelaySlider);
+  section.appendChild(zenDelayRow);
 
   const style = document.createElement('style');
   style.textContent = `
@@ -501,6 +542,43 @@ function _mountFxSection() {
   panel.appendChild(section);
 
   items.forEach(item => { _bindFxToggle(item.id, item.storeKey); });
+  _bindZenIdleDelaySlider();
+}
+
+/*
+ * [버그 수정 — C-6] 젠 모드 진입 시간 슬라이더 바인딩
+ * ─────────────────────────────────────────────────────────────
+ * input 이벤트로 store.zenIdleDelaySec를 실시간 갱신하고, 설명
+ * 텍스트의 초 단위 숫자도 함께 동기화한다. fxZenMode가 꺼져 있으면
+ * 슬라이더를 disabled 처리해 무의미한 조작을 막는다.
+ */
+function _bindZenIdleDelaySlider() {
+  const slider = DOMProxy.get('input-zen-idle-delay');
+  const desc   = DOMProxy.get('zen-idle-delay-desc');
+  if (!slider || slider === DOMProxy.VOID_NODE) return;
+
+  function _syncDisabledState() {
+    const enabled = store.fxZenMode !== false;
+    slider.disabled = !enabled;
+    slider.style.opacity = enabled ? '1' : '0.45';
+  }
+
+  slider.value = String(store.zenIdleDelaySec ?? 2);
+  _syncDisabledState();
+
+  slider.addEventListener('input', () => {
+    const v = Math.max(1, Math.min(10, parseInt(slider.value, 10) || 2));
+    store.zenIdleDelaySec = v;
+    setTextSafe(desc, `${v}초간 조작이 없으면 상하단 바를 숨깁니다.`);
+    _saveStateToLS();
+  });
+
+  ReactiveStore.subscribe('zenIdleDelaySec', (v) => {
+    if (slider.value !== String(v)) slider.value = String(v);
+    setTextSafe(desc, `${v}초간 조작이 없으면 상하단 바를 숨깁니다.`);
+  });
+
+  ReactiveStore.subscribe('fxZenMode', _syncDisabledState);
 }
 
 function initFxSettingsUI() {
@@ -516,20 +594,65 @@ function initFxSettingsUI() {
    userSpacing, fontWeightBoost를 ReactiveStore.patch()로 한 번에 동기화한다.
    사용자가 개별 슬라이더(폰트 굵기 보정 등)를 직접 조작하면
    store.readingProfile이 'custom-profile'로 전환되어 active 표시가 풀린다.
+
+   [버그 수정 — C-5] 프로필 변경 시 페이드 인/아웃 FX 트랜지션
+   ─────────────────────────────────────────────────────────────────
+   기존에는 reapplyInlineTheme()이 즉시 동기적으로 <style>을 갈아
+   끼워 폰트 크기/굵기가 한 프레임에 뚝 끊겨 바뀌었다. 본문 iframe의
+   body에 짧은 opacity 트랜지션을 걸어 "옅어짐 → 스타일 교체 →
+   다시 밝아짐" 흐름으로 우아하게 전환한다. store.fxAnimation이
+   false인 경우(저사양/모션 최소화 선호)에는 트랜지션을 생략하고
+   즉시 적용해 회귀 없이 동작한다.
    ══════════════════════════════════════════════════════════════════ */
+function _getIframeBodies() {
+  try {
+    const contents = store.rendition?.getContents?.() || [];
+    const arr = Array.isArray(contents) ? contents : [contents];
+    return arr.map(c => c?.document?.body).filter(Boolean);
+  } catch (_) { return []; }
+}
+
+function _fadeApplyProfileStyle(applyFn) {
+  if (store.fxAnimation === false || !store.rendition) { applyFn(); return; }
+  const bodies = _getIframeBodies();
+  if (!bodies.length) { applyFn(); return; }
+
+  const FADE_OUT_MS = 140, FADE_IN_MS = 220;
+  bodies.forEach(b => {
+    b.style.transition = `opacity ${FADE_OUT_MS}ms ease`;
+    b.style.opacity = '0.18';
+  });
+  setTimeout(() => {
+    applyFn();
+    /* 새로 주입된 <style>이 적용된 직후 body가 새로 생성되거나
+       동일 참조일 수 있으므로, 다시 한 번 최신 body 목록을 가져와
+       복귀 트랜지션을 건다. */
+    const freshBodies = _getIframeBodies();
+    (freshBodies.length ? freshBodies : bodies).forEach(b => {
+      b.style.transition = `opacity ${FADE_IN_MS}ms ease`;
+      b.style.opacity = '1';
+    });
+    setTimeout(() => {
+      (freshBodies.length ? freshBodies : bodies).forEach(b => { b.style.transition = ''; b.style.opacity = ''; });
+    }, FADE_IN_MS + 30);
+  }, FADE_OUT_MS);
+}
+
 function _applyReadingProfile(profileId) {
   const profile = READING_PROFILES[profileId];
   if (!profile) return;
 
-  ReactiveStore.patch({
-    fontSize:        profile.fontSize,
-    lineHeight:       profile.lineHeight,
-    userSpacing:      profile.userSpacing,
-    fontWeightBoost:  profile.fontWeightBoost,
-    readingProfile:   profileId,
+  _fadeApplyProfileStyle(() => {
+    ReactiveStore.patch({
+      fontSize:        profile.fontSize,
+      lineHeight:       profile.lineHeight,
+      userSpacing:      profile.userSpacing,
+      fontWeightBoost:  profile.fontWeightBoost,
+      readingProfile:   profileId,
+    });
+    try { reapplyInlineTheme(); } catch (_) {}
   });
 
-  try { reapplyInlineTheme(); } catch (_) {}
   _saveStateToLS();
   Toast.show(`'${profile.label}' 프로필이 적용되었습니다.`, 'success');
 }

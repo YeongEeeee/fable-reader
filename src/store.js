@@ -13,6 +13,10 @@
  *   [심화 설정 — 인사이트 주기]  insightSummaryInterval — 'daily' | 'weekly'.
  *   [한국어 하이픈/정렬]         hyphenateKorean — true 시 본문에 hyphens/text-align 보정 적용.
  *   [목표 달성 세레머니]         goalCelebrationShown — 당일 목표 100% 달성 1회성 트리거 가드.
+ *   [리액티브 비동기 배칭 루프] ReactiveStore가 requestAnimationFrame 단독
+ *     배칭에서 queueMicrotask + requestAnimationFrame 2단계 배칭으로 전환.
+ *     ms 단위로 연쇄 발생하는 store 변경을 microtask 한 틱 안에서 모두
+ *     수집한 뒤, 실제 DOM 반영은 다음 rAF 프레임에 1회만 수행한다.
  *
  * 변경 사항 (v4.0 — 유지):
  *   - LZ-String 기반 인라인 압축 엔진 (LZStore) 추가
@@ -258,11 +262,32 @@ export const DOMProxy = (() => {
    ══════════════════════════════════════════════════════════════════ */
 export const ReactiveStore = (() => {
   const subscribers = new Map();
-  let   pendingKeys = new Set();
-  let   flushQueued = false;
+  let   pendingKeys  = new Set();
+  let   microQueued  = false;   /* queueMicrotask 1차 수집 윈도우 예약 여부 */
+  let   rafQueued    = false;   /* requestAnimationFrame 2차 DOM 반영 예약 여부 */
 
-  function _flush() {
-    flushQueued = false;
+  /*
+   * [v5.0 신규 — 고도화 #1] 리액티브 비동기 배칭 루프 (2-Tier Batching)
+   * ─────────────────────────────────────────────────────────────────
+   * 기존(v4.x)에는 store 값이 바뀔 때마다 requestAnimationFrame만으로
+   * 배칭했다. rAF는 다음 페인트 프레임(최대 ~16.6ms)까지 지연되므로,
+   * 같은 동기 실행 컨텍스트(예: patch({...}) 다중 키 갱신, for 루프 내
+   * 연속 store[key] = v 대입, Promise 체인의 동기 구간)에서 키가 ms
+   * 단위로 급변할 때는 문제가 없지만, "현재 매크로태스크가 끝나는
+   * 즉시" 가장 최신 상태를 보장해야 하는 비-DOM 파생 로직(예: 다른
+   * 모듈이 store 변경을 await 없이 동기적으로 연쇄 참조하는 경우)에는
+   * rAF 지연이 불필요하게 크다.
+   *
+   * 해결책: queueMicrotask로 "1차 수집 마감"을 현재 태스크 종료 직후로
+   * 당겨 pendingKeys 스냅샷을 동결한다. 이후 실제 DOM 반영(_flushToDom)은
+   * 여전히 requestAnimationFrame 한 틱에 모아 실행하여, 마이크로태스크
+   * 폭주 중에도 강제 동기 레이아웃/리플로우가 프레임당 1회로 제한된다.
+   * 즉, microtask = "언제까지 변경을 모을지"의 마감시한, rAF = "실제로
+   * 화면에 반영하는 시점" 역할을 분리해 과부하를 방지한다.
+   */
+  function _flushToDom() {
+    rafQueued = false;
+    if (!pendingKeys.size) return;
     const keys = [...pendingKeys];
     pendingKeys.clear();
     keys.forEach(key => {
@@ -277,10 +302,28 @@ export const ReactiveStore = (() => {
     });
   }
 
+  function _scheduleDomFlush() {
+    if (rafQueued) return;
+    rafQueued = true;
+    requestAnimationFrame(_flushToDom);
+  }
+
+  /* 1차 수집 윈도우 — 현재 매크로태스크 종료 직후 마감.
+     동일 틱 안에서 발생한 모든 set()이 microtask 콜백 실행 전까지는
+     계속 같은 pendingKeys Set에 합류하므로, ms 단위 연쇄 변경이
+     자연스럽게 단일 배치로 합쳐진다. */
+  function _microFlush() {
+    microQueued = false;
+    _scheduleDomFlush();
+  }
+
   function _notify(key) {
     pendingKeys.add(key);
-    if (!flushQueued) { flushQueued = true; requestAnimationFrame(_flush); }
+    if (!microQueued) { microQueued = true; queueMicrotask(_microFlush); }
   }
+
+  /* 디버그/테스트 훅 — 배칭 큐 상태를 외부에서 관찰할 수 있도록 노출 */
+  function _pendingCount() { return pendingKeys.size; }
 
   const rawState = {
     /* ── EPUB 런타임 ── */
@@ -423,10 +466,13 @@ export const ReactiveStore = (() => {
   }
 
   function patch(updates) {
+    /* Object.entries 순회 자체가 단일 동기 컨텍스트이므로, 여러 키가
+       한 번에 바뀌어도 microtask 마감 전까지 같은 pendingKeys Set에
+       합류해 단일 배치로 플러시된다(추가 디바운스 불필요). */
     Object.entries(updates).forEach(([k, v]) => { store[k] = v; });
   }
 
-  return { store, subscribe, patch };
+  return { store, subscribe, patch, _pendingCount };
 })();
 
 export const store = ReactiveStore.store;

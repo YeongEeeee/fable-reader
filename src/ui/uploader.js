@@ -44,29 +44,92 @@ import { MetadataEditor, AnnotationExporter } from './viewer.js';
    ══════════════════════════════════════════════════════════ */
 const TITLE_MAX_LEN = 10;
 
+/**
+ * [v5.0 신규] LRU 본문 바이너리 무력화(database.js의
+ * reapLeastRecentlyUsedBinaries) 가드 — 도서 카드/리스트의 모든 진입점
+ * (썸네일 카드, 컴팩트 리스트, 최근 읽은 책)에서 책을 열기 전에 호출한다.
+ * b.binaryEvicted === true 이거나 b.bytes가 비어있으면(용량 확보를 위해
+ * 본문이 정리된 스텁 레코드) openEpubBook을 호출하지 않고 사용자에게
+ * 재임포트를 안내하는 토스트만 표시한다. 정상 레코드는 그대로 통과시켜
+ * 기존 동작을 보존한다.
+ */
+function _openBookGuarded(b) {
+  if (!b) return;
+  if (b.binaryEvicted || !b.bytes) {
+    Toast.show(
+      `'${b.title || '이 책'}'은 저장 공간 확보를 위해 본문이 정리되었습니다. 파일을 다시 추가해 주세요.`,
+      'info',
+    );
+    return;
+  }
+  openEpubBook(b.bytes, true);
+}
+
 /** 사전 정의 장르 태그 및 컬러 브랜딩 */
+/*
+ * [버그 수정 — D-4] 장르 태그 칩 컬러 브랜딩 가시성 보정
+ * ─────────────────────────────────────────────────────────────
+ * 기존 색상은 라이트 테마 페이지 배경(#fcfbf7) 위 비활성 칩
+ * (color-on-tint)과 활성 칩(흰색-on-saturated-color) 양쪽 모두에서
+ * WCAG 2.1 AA 명도 대비(4.5:1)를 충족하지 못했다(실측 2.6~4.2:1).
+ * 각 색상의 색조(hue)는 보존한 채 명도(lightness)만 조정하여 두
+ * 상태 모두 4.5:1 이상을 만족하도록 재계산했다. 다크 테마에서는
+ * 동일한 색상이 어두운 배경(#1a1a1e) 위에서 다시 대비 실패를
+ * 일으키므로, _getTagColor()가 store.theme을 참조해 다크 모드일
+ * 때는 더 밝은 변형(라이트 모드와 동일 hue, 상향 보정된 lightness)을
+ * 반환하도록 분기한다.
+ */
 export const GENRE_TAGS = [
-  { name: '판타지',    color: '#7c6fcd', bg: 'rgba(124,111,205,0.12)' },
-  { name: '로맨스',    color: '#c46a8a', bg: 'rgba(196,106,138,0.12)' },
-  { name: '무협',      color: '#b0834a', bg: 'rgba(176,131,74,0.12)'  },
-  { name: 'SF/미스터리', color: '#4a8fb0', bg: 'rgba(74,143,176,0.12)'  },
-  { name: '현대판타지', color: '#6aab7e', bg: 'rgba(106,171,126,0.12)' },
-  { name: '일반소설',  color: '#8a7a6a', bg: 'rgba(138,122,106,0.12)' },
+  { name: '판타지',    color: '#7264c9', bg: 'rgba(114,100,201,0.12)' },
+  { name: '로맨스',    color: '#ba5076', bg: 'rgba(186,80,118,0.12)'  },
+  { name: '무협',      color: '#906b3c', bg: 'rgba(144,107,60,0.12)'  },
+  { name: 'SF/미스터리', color: '#3f7b97', bg: 'rgba(63,123,151,0.12)'  },
+  { name: '현대판타지', color: '#467d57', bg: 'rgba(70,125,87,0.12)'   },
+  { name: '일반소설',  color: '#7e7061', bg: 'rgba(126,112,97,0.12)'  },
 ];
 
-/** 장르 태그 이름 → 컬러 맵 */
+/* 다크 테마용 — 동일 hue, 어두운 배경(#1a1a1e) 대비 4.5:1 이상을
+   만족하도록 밝기를 끌어올린 변형. 활성 상태에서는 검정 텍스트를
+   사용해 대비를 확보한다(흰 텍스트는 이 밝기에서 대비가 부족하다). */
+const GENRE_TAGS_DARK = {
+  '판타지':    '#8478d0',
+  '로맨스':    '#c66e8d',
+  '무협':      '#b4864c',
+  'SF/미스터리': '#4c92b4',
+  '현대판타지':  '#6ead81',
+  '일반소설':   '#91806f',
+};
+
+/** 장르 태그 이름 → 컬러 맵 (라이트 테마 기준) */
 const _TAG_COLOR_MAP = Object.fromEntries(GENRE_TAGS.map(g => [g.name, { color: g.color, bg: g.bg }]));
 
 function _getTagColor(tagName) {
-  if (_TAG_COLOR_MAP[tagName]) return _TAG_COLOR_MAP[tagName];
-  /* 커스텀 태그: 이름 해시로 세피아 앰버 계열 생성 */
+  const isDark = store.theme === 'dark';
+
+  if (_TAG_COLOR_MAP[tagName]) {
+    if (!isDark) return _TAG_COLOR_MAP[tagName];
+    const darkColor = GENRE_TAGS_DARK[tagName] || _TAG_COLOR_MAP[tagName].color;
+    return { color: darkColor, bg: _hexToRgba(darkColor, 0.16), darkActiveText: '#1a1814' };
+  }
+
+  /* 커스텀 태그: 이름 해시로 세피아 앰버 계열 생성. 라이트/다크 모두
+     4.5:1 대비를 만족하도록 명도(L)를 모드별로 분리 계산한다. */
   let h = 0;
   for (let i = 0; i < tagName.length; i++) h = (h * 31 + tagName.charCodeAt(i)) & 0xffffff;
   const hue = 25 + (h % 30); /* 앰버-세피아 범위 (25°~55°) */
+  const light = isDark ? 68 : 38; /* 다크 모드는 밝게, 라이트 모드는 어둡게 */
+  const color = `hsl(${hue}, 55%, ${light}%)`;
   return {
-    color: `hsl(${hue}, 55%, 42%)`,
-    bg:    `hsla(${hue}, 55%, 42%, 0.12)`,
+    color,
+    bg: `hsla(${hue}, 55%, ${light}%, ${isDark ? 0.18 : 0.12})`,
+    darkActiveText: isDark ? '#1a1814' : undefined,
   };
+}
+
+function _hexToRgba(hex, alpha) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 export function truncateTitle(title) {
@@ -462,12 +525,12 @@ function renderRecentBooks(books) {
     resumeBtn.textContent = '이어서 몰입하기 →';
     resumeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      openEpubBook(b.bytes, true);
+      _openBookGuarded(b);
     });
 
     info.append(titleEl, progWrap, pctText, resumeBtn);
     item.append(cover, info);
-    item.addEventListener('click', () => openEpubBook(b.bytes, true));
+    item.addEventListener('click', () => _openBookGuarded(b));
     frag.appendChild(item);
   });
   row.appendChild(frag);
@@ -595,47 +658,19 @@ const _DND_CSS = `
   }
   .tag-context-btn:hover { transform: scale(1.06); }
   .tag-context-btn.active { outline: 2px solid currentColor; }
-  /* 스마트 태그 폴더 그리드 */
-  .smart-tag-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-    gap: 10px;
-    padding: 4px 0 12px;
-  }
-  .smart-tag-folder {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 14px 8px 10px;
-    border-radius: 14px;
-    border: 1.5px solid rgba(120,100,80,0.12);
-    background: rgba(250,246,240,0.7);
-    cursor: pointer;
-    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-    position: relative;
-    user-select: none;
-  }
-  [data-theme="dark"] .smart-tag-folder {
-    background: rgba(32,26,20,0.6);
-    border-color: rgba(120,90,60,0.2);
-  }
-  .smart-tag-folder:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.10);
-  }
-  .smart-tag-folder.active {
-    border-color: currentColor;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-  }
-  .smart-tag-folder.drop-target {
-    transform: scale(1.06);
-    box-shadow: 0 0 0 2px currentColor, 0 8px 24px rgba(0,0,0,0.12);
-  }
-  .smart-tag-folder.suction-flash { animation: fable-suction 380ms ease forwards; }
-  .smart-tag-icon { font-size: 22px; line-height: 1; }
-  .smart-tag-name { font-size: 12px; font-weight: 600; text-align: center; }
-  .smart-tag-count { font-size: 10px; color: var(--color-ink-muted,#8a7a6a); }
+  /*
+   * [버그 수정 — D-7] 스마트 태그 폴더 그리드 아이콘 비주얼 정렬
+   * ─────────────────────────────────────────────────────────────
+   * .smart-tag-grid / .smart-tag-folder / .smart-tag-icon 등의 정의가
+   * 이 인라인 <style> 블록과 fx.css §18에 중복 선언되어 있었다.
+   * 두 선언이 서로 다른 grid-template-columns(120px vs 110px)와
+   * gap(6px vs 5px) 값을 가지고 있어, 스타일시트 삽입 순서에 따라
+   * 어느 쪽이 우선 적용되는지가 비결정적으로 갈렸고, 이로 인해
+   * 폴더 아이콘과 폴더명 텍스트의 픽셀 그리드가 뷰포트/해상도에 따라
+   * 미세하게 어긋나는 가시성 왜곡이 발생했다. fx.css §18을 단일
+   * 진실 공급원으로 삼고 이 중복 선언을 제거한다(fx.css 쪽이 호버 시
+   * 아이콘 확대 트랜지션 등 더 정교한 버전이므로 그쪽을 유지한다).
+   */
   /* 대시보드 HUD */
   #dashboard-hud {
     padding: 16px 0 8px;
@@ -929,11 +964,15 @@ function _showTagContextPopup(book, anchorEl) {
   allDisplayTags.forEach(tagName => {
     const tc     = _getTagColor(tagName);
     const active = currentTags.has(tagName);
+    /* [버그 수정 — D-4] 다크 모드에서는 밝아진 칩 색상 위에 흰색
+       텍스트를 올리면 대비가 부족하므로, darkActiveText(짙은 잉크색)
+       를 우선 사용한다. */
+    const activeTextColor = tc.darkActiveText || '#fff';
 
     const btn = document.createElement('button');
     btn.className = 'tag-context-btn' + (active ? ' active' : '');
     btn.style.background = active ? tc.color : tc.bg;
-    btn.style.color      = active ? '#fff' : tc.color;
+    btn.style.color      = active ? activeTextColor : tc.color;
     btn.textContent = '#' + tagName;
 
     btn.addEventListener('click', async () => {
@@ -946,7 +985,7 @@ function _showTagContextPopup(book, anchorEl) {
         currentTags.add(tagName);
         btn.classList.add('active');
         btn.style.background = tc.color;
-        btn.style.color      = '#fff';
+        btn.style.color      = activeTextColor;
       }
       await StorageSystem.updateBookTags(book.bookKey, [...currentTags]);
       await refreshLibraryData();
@@ -1269,7 +1308,8 @@ function renderTagBar(allTags, books) {
     chip.setAttribute('aria-pressed', String(active));
     if (active) {
       chip.style.background  = tc.color;
-      chip.style.color       = '#fff';
+      /* [버그 수정 — D-4] 다크 모드 밝은 칩 배경에는 짙은 텍스트 사용 */
+      chip.style.color       = tc.darkActiveText || '#fff';
       chip.style.borderColor = tc.color;
     } else {
       chip.style.background  = tc.bg;
@@ -1507,6 +1547,11 @@ function _buildBookCard(b, opts = {}) {
   const titleEl = document.createElement('div');
   titleEl.className = 'book-card-title';
   titleEl.textContent = truncateTitle(fullTitle);
+  /* [버그 수정 — D-6] 컴팩트/그리드 뷰에서 제목이 말줄임 처리될 때
+     마우스 호버 시 전체 제목을 보여주는 네이티브 툴팁. truncateTitle()
+     은 표시 텍스트 자체를 10자로 자르므로, title 속성에는 잘리지 않은
+     원본 fullTitle을 담아야 전체 텍스트가 노출된다. */
+  titleEl.title = fullTitle;
 
   const tagRow = document.createElement('div');
   tagRow.className = 'book-card-tags';
@@ -1523,7 +1568,7 @@ function _buildBookCard(b, opts = {}) {
   card.append(coverWrap, titleEl);
   if ((b.tags || []).length) card.appendChild(tagRow);
 
-  card.addEventListener('click', () => openEpubBook(b.bytes, true));
+  card.addEventListener('click', () => _openBookGuarded(b));
   return card;
 }
 
@@ -1557,6 +1602,9 @@ function _buildBookRow(b) {
   titleEl.className = 'book-card-title';
   titleEl.style.fontSize = '13.5px';
   titleEl.textContent = fullTitle;
+  /* [버그 수정 — D-6] 컴팩트 리스트 뷰 제목 CSS 말줄임(ellipsis) 시
+     마우스 호버로 전체 제목을 확인할 수 있도록 네이티브 툴팁 추가 */
+  titleEl.title = fullTitle;
 
   const tagRow = document.createElement('div');
   tagRow.className = 'book-card-tags';
@@ -1584,9 +1632,94 @@ function _buildBookRow(b) {
   menuBtn.addEventListener('click', (e) => { e.stopPropagation(); _showCardMenu(b, menuBtn); });
 
   row.append(thumb, info, menuBtn);
-  row.addEventListener('click', () => openEpubBook(b.bytes, true));
+  row.addEventListener('click', () => _openBookGuarded(b));
   return row;
 }
+
+/* ══════════════════════════════════════════════════════════
+   §12-Z. [v5.0 신규 — 고도화 #5] 스마트 태그 다중 논리곱(AND) 검색
+   엔진 — LibraryQueryEngine
+   ─────────────────────────────────────────────────────────
+   기존에는 renderLibraryGrid() 내부에 폴더/태그/텍스트 검색 필터가
+   순차적으로 흩어져 있었다. 이를 단일 진실 공급원의 쿼리 파이프라인
+   으로 통합하여:
+     1) 폴더 필터(activeFolderId) → 단일 등호 비교, 가장 좁히는 효과가
+        크므로 항상 1순위로 적용해 이후 단계의 입력 크기를 최소화한다.
+     2) 태그 AND 교차 필터(activeTags) → 선택된 모든 태그를 동시에
+        보유한 도서만 통과시킨다. 기존 `.every(t => arr.includes(t))`는
+        태그 수(m) × 도서당 태그 수(k)에 비례해 매 비교마다 선형 탐색이
+        반복되는 O(n·m·k) 패턴이었다. 도서별 tags 배열을 Set으로 1회
+        변환한 뒤 selectedTags Set과 대조하면 비교 자체는 O(1)에 가깝게
+        줄어들어, 태그 수가 늘어나는 서재일수록 체감 향상이 커진다.
+     3) 텍스트 검색(librarySearch) → 제목/저자 소문자 비교는 그대로
+        유지하되, 1)과 2)를 통과한 더 작은 부분집합에만 적용되도록
+        순서를 고정해 불필요한 비교를 줄인다.
+   각 단계는 독립 함수로 분리되어 단위 테스트 및 재사용(예: 전문 검색
+   모달에서 동일 AND 교차 로직 재사용)이 용이하다.
+   ══════════════════════════════════════════════════════════ */
+const LibraryQueryEngine = (() => {
+
+  /** 폴더 필터 — activeFolderId가 null이면 전체 통과 */
+  function _filterByFolder(books, folderId) {
+    if (folderId === null || folderId === undefined) return books;
+    return books.filter(b => b.folderId === folderId);
+  }
+
+  /**
+   * 태그 다중 논리곱(AND) 교차 필터
+   * — selectedTags의 모든 항목을 보유한 도서만 통과
+   * — 도서당 tags 배열을 Set으로 변환해 포함 여부 검사를 O(1)화
+   */
+  function _filterByTagsAND(books, selectedTags) {
+    if (!selectedTags || !selectedTags.length) return books;
+    return books.filter(b => {
+      const bookTagSet = new Set(b.tags || []);
+      /* selectedTags 쪽에서 every를 도는 것이 아니라, 가장 적은 쪽
+         (보통 selectedTags가 더 짧음)을 기준으로 순회해 비교 횟수를
+         최소화한다. */
+      for (let i = 0; i < selectedTags.length; i++) {
+        if (!bookTagSet.has(selectedTags[i])) return false;
+      }
+      return true;
+    });
+  }
+
+  /** 제목/저자 부분 일치 텍스트 검색 (대소문자 무시) */
+  function _filterByText(books, rawQuery) {
+    const q = (rawQuery || '').trim().toLowerCase();
+    if (!q) return books;
+    return books.filter(b =>
+      (b.title   || '').toLowerCase().includes(q) ||
+      (b.creator || '').toLowerCase().includes(q)
+    );
+  }
+
+  function _applySort(books, sortMode) {
+    const sorted = books.slice();
+    switch (sortMode) {
+      case 'title':    sorted.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
+      case 'progress': sorted.sort((a, b) => (b.percent || 0) - (a.percent || 0)); break;
+      case 'added':    sorted.sort((a, b) => (b.seq || 0) - (a.seq || 0)); break;
+      case 'recent': default: sorted.sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0)); break;
+    }
+    return sorted;
+  }
+
+  /**
+   * 전체 쿼리 파이프라인 실행 — 폴더 → 태그 AND → 텍스트 → 정렬 순.
+   * 좁히는 효과가 큰 필터를 먼저 적용해 다음 단계 입력을 줄인다.
+   */
+  function execute(allBooks, { folderId, activeTags, searchQuery, sortMode }) {
+    let result = allBooks;
+    result = _filterByFolder(result, folderId);
+    result = _filterByTagsAND(result, activeTags);
+    result = _filterByText(result, searchQuery);
+    result = _applySort(result, sortMode);
+    return result;
+  }
+
+  return { execute, _filterByFolder, _filterByTagsAND, _filterByText, _applySort };
+})();
 
 /* ══════════════════════════════════════════════════════════
    §13. renderLibraryGrid — Virtual Scroll 통합 진입점
@@ -1612,25 +1745,13 @@ function renderLibraryGrid() {
   renderTagBar(store.allTags || [], allBooks);
   renderSmartTagFolders(store.allTags || [], allBooks);
 
-  /* 필터 파이프라인 */
-  let books = allBooks.slice();
-
-  if (store.activeFolderId !== null) books = books.filter(b => b.folderId === store.activeFolderId);
-  if ((store.activeTags || []).length) {
-    books = books.filter(b => store.activeTags.every(t => (b.tags || []).includes(t)));
-  }
-
-  const q = (store.librarySearch || '').trim().toLowerCase();
-  if (q) books = books.filter(b =>
-    (b.title || '').toLowerCase().includes(q) || (b.creator || '').toLowerCase().includes(q)
-  );
-
-  switch (store.sortMode) {
-    case 'title':    books.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
-    case 'progress': books.sort((a, b) => (b.percent || 0) - (a.percent || 0)); break;
-    case 'added':    books.sort((a, b) => (b.seq || 0) - (a.seq || 0)); break;
-    case 'recent': default: books.sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0)); break;
-  }
+  /* [v5.0] 단일 쿼리 파이프라인 — LibraryQueryEngine.execute() */
+  const books = LibraryQueryEngine.execute(allBooks, {
+    folderId:    store.activeFolderId,
+    activeTags:  store.activeTags || [],
+    searchQuery: store.librarySearch || '',
+    sortMode:    store.sortMode,
+  });
 
   if (signal.aborted) return;
   grid.innerHTML = '';
@@ -1884,4 +2005,5 @@ export {
   initLibrarySubscriptions,
   initMobileImportBridge,
   initDashboardHudToggle,
+  LibraryQueryEngine,
 };

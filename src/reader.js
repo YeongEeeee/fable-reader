@@ -91,6 +91,16 @@ const deps = {
      main.js가 registerReaderDeps()로 viewer.js의 QuickSettingsPopover를
      주입한다. 기본값은 no-op이므로 주입 전에도 안전하게 동작한다. */
   onViewerTap:         () => {},
+  /*
+   * [버그 수정 — A-6] 좀비 오디오/TTS 정리 콜백
+   * ─────────────────────────────────────────────────────────────
+   * reader.js는 순환 의존성 차단 규칙상 viewer.js(TTSSystem)를 직접
+   * import할 수 없으므로, main.js가 registerReaderDeps()로
+   * TTSSystem.stop을 주입한다. destroyCurrentRenditionContext()가
+   * 뷰어 이탈/도서 전환 시 이를 호출하여 speechSynthesis.cancel()이
+   * 누락되어 TTS 음성이 백그라운드에서 계속 재생되는 누수를 차단한다.
+   */
+  stopTTS:             () => {},
 };
 
 export function registerReaderDeps(overrides) {
@@ -271,32 +281,58 @@ const CFIPrecisionGuard = (() => {
    — store.measuredWpm에 rAF 배칭으로 반영 (Reactive 파이프라인 활용)
    ══════════════════════════════════════════════════════════════════ */
 export const WPMTracker = (() => {
-  const SAMPLE_WINDOW  = 10;
-  const WORDS_PER_PAGE = 250;
+  const SAMPLE_WINDOW    = 10;
+  const WORDS_PER_PAGE   = 250;
+
+  /*
+   * [v5.0 신규 — 고도화 #4] IQR 이상치 제거 윈도우 필터링 정밀화
+   * ─────────────────────────────────────────────────────────────────
+   * 기존 구현의 한계:
+   *   1) elapsed < 500ms 하드 컷오프만으로 "오인식 클릭(연타)"을 걸러
+   *      냈으나, 페이지가 짧은 도서에서는 정상적인 빠른 넘김도 500ms
+   *      근방에서 발생할 수 있어 과소/과대 필터링 위험이 공존했다.
+   *   2) 표본이 너무 적을 때(2~3개) 사분위 인덱스가 같은 원소를
+   *      가리켜 IQR=0이 되면, q1/q3 경계가 거의 모든 표본을 이상치로
+   *      처리해버리는 불안정한 구간이 존재했다.
+   *   3) 분포가 한쪽으로 치우치면 lo(하한 경계)가 음수로 계산될 수
+   *      있어 사실상 "너무 빨라서 의심스러운" 표본을 걸러내는 의미가
+   *      퇴색했다.
+   *   4) _pendingWpm, _totalPages가 선언만 되고 실질적으로 사용되지
+   *      않는 죽은 상태였다.
+   *
+   * 개선:
+   *   - MIN_SAMPLES_FOR_IQR(4) 미만이면 IQR 계산을 보류하고 단순
+   *     산술 평균으로 폴백한다(표본 부족 구간의 통계적 불안정 회피).
+   *   - 하한 경계(lo)를 ABS_MIN_PAGE_MS(800ms)와 IQR 하한 중 더 큰
+   *     값으로 클램프하여, 분포 자체가 왜곡되어도 "물리적으로 읽었다고
+   *     보기 어려운" 빠른 클릭은 항상 차단되도록 이중 가드를 둔다.
+   *   - 죽은 변수(_pendingWpm, _totalPages 사용처 없음)를 제거하고
+   *     실제로 참조되는 상태만 유지한다.
+   */
+  const MIN_TURN_GAP_MS  = 500;   /* 페이지 기록 자체를 무시하는 최소 간격 */
+  const ABS_MIN_PAGE_MS  = 800;   /* IQR과 무관하게 항상 적용되는 절대 하한 */
+  const MIN_SAMPLES_FOR_IQR = 4;  /* 이 미만이면 IQR 대신 단순 평균 사용 */
 
   let _samples        = [];
   let _lastPageTs     = 0;
   let _sessionStartTs = 0;
-  let _totalPages     = 0;
   let _wpmRafId       = null;
-  let _pendingWpm     = 0;
 
   function startSession() {
     _sessionStartTs = Date.now();
     _lastPageTs     = _sessionStartTs;
     _samples        = [];
-    _totalPages     = 0;
-    _pendingWpm     = 0;
   }
 
   function recordPageTurn() {
     const now = Date.now();
     if (_lastPageTs === 0) { _lastPageTs = now; return; }
     const elapsed = now - _lastPageTs;
-    if (elapsed < 500) return;
+    /* [오인식 클릭 차단 1차] 최소 간격 미달 시 샘플 자체를 기록하지
+       않는다 — 연타로 인한 더블/트리플 트리거를 원천에서 배제. */
+    if (elapsed < MIN_TURN_GAP_MS) return;
     _lastPageTs = now;
-    _totalPages++;
-    _samples.push({ ts: now, elapsedMs: elapsed });
+    _samples.push(elapsed);
     if (_samples.length > SAMPLE_WINDOW) _samples.shift();
     _scheduleWpmUpdate();
   }
@@ -309,17 +345,37 @@ export const WPMTracker = (() => {
     });
   }
 
+  /**
+   * IQR 기반 이상치 제거 + 절대 하한 가드를 결합한 평균 산출.
+   * 표본이 충분치 않으면(MIN_SAMPLES_FOR_IQR 미만) IQR을 생략하고
+   * ABS_MIN_PAGE_MS만으로 1차 필터링한 단순 평균을 사용한다.
+   */
+  function _filterOutliers(times) {
+    const sorted = times.slice().sort((a, b) => a - b);
+
+    if (sorted.length < MIN_SAMPLES_FOR_IQR) {
+      return sorted.filter(t => t >= ABS_MIN_PAGE_MS);
+    }
+
+    const q1Idx = Math.floor(sorted.length * 0.25);
+    const q3Idx = Math.floor(sorted.length * 0.75);
+    const q1    = sorted[q1Idx];
+    const q3    = sorted[q3Idx];
+    const iqr   = q3 - q1;
+
+    /* [이중 가드] IQR 하한과 절대 물리적 하한 중 더 보수적인(큰) 값을
+       채택 — 분포가 좁아 IQR 하한이 비정상적으로 낮게 잡혀도 절대
+       하한선이 "오인식 클릭"을 항상 차단한다. */
+    const iqrLo = q1 - 1.5 * iqr;
+    const lo    = Math.max(ABS_MIN_PAGE_MS, iqrLo);
+    const hi    = q3 + 1.5 * iqr;
+
+    return sorted.filter(t => t >= lo && t <= hi);
+  }
+
   function _computeAndCommitWpm() {
     if (_samples.length < 2) return;
-    const times    = _samples.map(s => s.elapsedMs).sort((a, b) => a - b);
-    const q1Idx    = Math.floor(times.length * 0.25);
-    const q3Idx    = Math.floor(times.length * 0.75);
-    const q1       = times[q1Idx];
-    const q3       = times[q3Idx];
-    const iqr      = q3 - q1;
-    const lo       = q1 - 1.5 * iqr;
-    const hi       = q3 + 1.5 * iqr;
-    const filtered = times.filter(t => t >= lo && t <= hi);
+    const filtered = _filterOutliers(_samples);
     if (!filtered.length) return;
     const avgMs   = filtered.reduce((s, t) => s + t, 0) / filtered.length;
     const wpm     = Math.round(WORDS_PER_PAGE / (avgMs / 60_000));
@@ -335,8 +391,6 @@ export const WPMTracker = (() => {
     if (_wpmRafId) { cancelAnimationFrame(_wpmRafId); _wpmRafId = null; }
     _samples    = [];
     _lastPageTs = 0;
-    _totalPages = 0;
-    _pendingWpm = 0;
   }
 
   return { startSession, recordPageTurn, getWpm, stopSession };
@@ -446,9 +500,18 @@ export const EyeProtectTimer = (() => {
     _ensureKeyframes();
     _dimEl = document.createElement('div');
     _dimEl.id = 'eye-protect-dim';
+    /*
+     * [버그 수정 — D-8] 시력 보호 딤 레이어 색상 보정
+     * ─────────────────────────────────────────────────────────────
+     * 기존 rgba(0,0,0,0.35)는 단순 검정 반투명으로, 화면을 어둡게만
+     * 만들 뿐 블루라이트 차단이라는 실제 의도와 무관한 색감이었다.
+     * 따뜻한 호박색/세피아 계열 저채도 블루라이트 차단 틴트로 교체해
+     * "눈을 편안하게 해주는" 느낌을 시각적으로도 전달하고, 앱 전반의
+     * 세피아 디자인 언어와도 통일감을 갖도록 한다.
+     */
     _dimEl.style.cssText = [
       'position:fixed', 'inset:0', 'z-index:9000',
-      'background:rgba(0,0,0,0.35)', 'pointer-events:none',
+      'background:rgba(60,38,12,0.32)', 'pointer-events:none',
       'animation:eyeDimFadeIn 1.2s ease forwards',
     ].join(';');
     document.body.appendChild(_dimEl);
@@ -749,14 +812,24 @@ export function injectContentStyles(contents) {
   const isCustom = store.theme === 'custom';
   const themeBg  = isDark ? '#1a1a1e' : isWhite ? '#ffffff' : isCustom ? store.userBg  : '#fcfbf7';
   const themeInk = isDark ? '#c8c6c0' : isWhite ? '#111111' : isCustom ? store.userInk : '#1a1814';
-  const lhVal    = LH_MAP[store.lineHeight] || '1.85';
   const fsVal    = `${store.fontSize}%`;
-  const spVal    = isCustom ? `${store.userSpacing}em` : '0em';
-  const userLH   = isCustom ? String(store.userLeading) : lhVal;
 
   const weightBoost = store.fontWeightBoost || 0;
   const baseWeight  = isDark ? 300 : 400;
   const finalWeight = Math.max(100, Math.min(900, baseWeight + weightBoost));
+
+  /*
+   * [버그 수정 — D-5] E-Ink 가독성 강화 모드 자간/행간 가변 보정
+   * ─────────────────────────────────────────────────────────────
+   * fontWeightBoost가 커질수록(활자가 두꺼워질수록) 글자 사이가
+   * 뭉개져 보이는 현상을 방지하기 위해, 굵기 증가량에 비례하여
+   * 자간(letter-spacing)을 미세하게 넓히고 행간(line-height)도
+   * 함께 보정한다. 사용자가 커스텀 테마에서 직접 지정한 값
+   * (userSpacing/userLeading)은 그대로 우선하며, boost가 0이면
+   * 기존 spVal/userLH 값과 동일하게 동작해 회귀가 없다.
+   */
+  const weightSpacingBoost = isCustom ? 0 : (weightBoost / 100) * 0.012;
+  const weightLeadingBoost = isCustom ? 0 : (weightBoost / 100) * 0.06;
 
   const contrast  = store.contrastScale ?? 1.0;
   const filterVal = isDark
@@ -767,20 +840,64 @@ export function injectContentStyles(contents) {
 
   const imgFilter = isDark ? 'filter: brightness(0.65) contrast(0.9);' : '';
 
-  /* [v5.0] 한국어 하이픈 / 양쪽 정렬 보정
-     — hyphenateKorean이 true일 때 text-align: justify + 균등 분배 보정을
-       적용하여 본문 우측 여백의 들쭉날쭉함을 줄인다. 한글은 음절 단위
-       줄바꿈(word-break: keep-all)이 기본이므로 CSS hyphens 속성은
-       라틴 문자 혼용 구간에만 보조적으로 작용한다. */
+  /*
+   * [v5.0 신규 — 고도화 #2] 한국어 전용 양끝 정렬(Justify) 공백
+   * 분산 알고리즘 정밀화
+   * ─────────────────────────────────────────────────────────────────
+   * 기존 구현(text-justify: inter-word)의 문제:
+   *   한국어 문장은 "조사/어미 뒤"에만 띄어쓰기가 오는 구조다(예:
+   *   "그는 학교에 갔다"). 한 줄에 띄어쓰기가 1~2개뿐인 짧은 문장이
+   *   많은데, inter-word 분산은 "단어(공백) 사이"에만 여백을 추가하므로
+   *   띄어쓰기 자체가 적은 한국어 줄에서는 단 한두 곳의 공백이
+   *   비정상적으로 크게 벌어져 조사 뒤가 부자연스럽게 끊어 보이는
+   *   "구멍(rivers)" 현상을 유발한다. 이는 영어처럼 단어마다 공백이
+   *   촘촘한 언어에서는 거의 문제되지 않지만, 한국어 특유의 띄어쓰기
+   *   밀도(어절 단위)에서는 가독성을 직접적으로 해친다.
+   *
+   * 개선 — 3단 분산 전략:
+   *   1) text-justify: inter-character — 분산 단위를 "단어 사이 공백"
+   *      에서 "글자(음절) 사이 간격"으로 확장한다. 분산 여백이 한두
+   *      개의 공백에 몰리지 않고 줄 전체의 글자 간격에 얕게 퍼지므로,
+   *      조사 뒤 공백이 유독 커지는 현상이 크게 완화된다. (단,
+   *      word-break: keep-all과 함께 사용해도 어절 자체가 쪼개지지는
+   *      않는다 — inter-character는 "줄 채우기용 여백 분산 방식"일
+   *      뿐, 줄바꿈 위치 결정 규칙인 keep-all과는 독립적으로 동작한다.)
+   *   2) text-align-last: left — 단락의 마지막 줄은 양끝 정렬에서
+   *      제외한다. 마지막 줄까지 강제로 늘리면 짧은 마지막 줄의 글자
+   *      간격이 부자연스럽게 벌어지는 또 다른 가독성 저해 요소가
+   *      생기므로, 일반적인 타이포그래피 관행대로 마지막 줄은 좌측
+   *      정렬로 자연스럽게 흘려보낸다.
+   *   3) word-spacing 미세 음수 보정 — inter-character 분산이 평소
+   *      글자 사이 간격에도 기본적으로 약간의 여유를 추가하는 경향이
+   *      있어, 분산이 발생하지 않는 짧은 줄에서도 시각적으로 살짝
+   *      넓어 보일 수 있다. word-spacing에 -0.02em의 미세한 음수
+   *      보정을 주어 평상시 어절 간 공백이 과도하게 두드러지지 않게
+   *      균형을 맞춘다. (letter-spacing은 store.fontWeightBoost 보정과
+   *      충돌하므로 건드리지 않고, word-spacing만 조정한다.)
+   *   라틴 문자/숫자 혼용 구간은 hyphens: auto가 여전히 보조적으로
+   *   작동해 영단어가 줄 끝에서 어색하게 잘리는 것을 방지한다.
+   */
   const hyphenCss = store.hyphenateKorean
     ? `
-      text-align:      justify !important;
-      text-justify:     inter-word;
-      hyphens:           auto;
-      -webkit-hyphens:   auto;
-      word-break:        keep-all;
+      text-align:        justify !important;
+      text-justify:       inter-character;
+      text-align-last:    left;
+      word-spacing:        -0.02em;
+      hyphens:             auto;
+      -webkit-hyphens:     auto;
+      word-break:          keep-all;
+      overflow-wrap:       break-word;
     `
     : '';
+
+  const spValBase = isCustom ? `${store.userSpacing}em` : '0em';
+  const spVal     = isCustom
+    ? spValBase
+    : `${(weightSpacingBoost).toFixed(4)}em`;
+  const userLHBase = isCustom ? String(store.userLeading) : (LH_MAP[store.lineHeight] || '1.85');
+  const userLH      = isCustom
+    ? userLHBase
+    : (parseFloat(userLHBase) + weightLeadingBoost).toFixed(3);
 
   style.textContent = `
     html, body {
@@ -859,13 +976,38 @@ export function initRenditionEngine(book) {
   });
   store.rendition = rendition;
 
+  /*
+   * [버그 수정 — A-2] 동일 이벤트 중복 등록(Race Condition) 차단
+   * ─────────────────────────────────────────────────────────────
+   * rendition 인스턴스 자체에 바인딩 완료 플래그를 직접 마킹하여,
+   * initRenditionEngine()이 (예: 빠른 연속 호출, 비동기 경합 등으로)
+   * 동일 rendition에 대해 두 번 실행되더라도 rendition.on() 호출이
+   * 중복되지 않도록 한다. 핸들러가 두 번 바인딩되면 페이지가 한 번의
+   * 키 입력에 두 장씩 넘어가는 현상이 발생하므로 반드시 방어해야 한다.
+   */
+  if (rendition.__fableEventsBound) return;
+  rendition.__fableEventsBound = true;
+
   registerEpubThemes(rendition);
   rendition.hooks.content.register((contents) => { injectContentStyles(contents); });
   _applyAllRenditionSettings(rendition);
 
+  /*
+   * [버그 수정 — A-3] EpubJS 렌더링 미완료(pending) 상태 가드
+   * ─────────────────────────────────────────────────────────────
+   * rendition.display()가 아직 resolve되기 전(책이 완전히 로드되거나
+   * 페이지 릴로케이션이 끝나기 전) 사용자가 방향키를 연타하면, 아직
+   * 초기화되지 않은 내부 상태에 NavGuard.prev/next가 접근해 런타임
+   * 예외가 발생할 수 있었다. store.rendition은 위에서 이미 설정되지만,
+   * "최초 display 완료 여부"를 별도 플래그로 추적해 NavGuard가 완료
+   * 이전에는 탐색 요청을 조용히 무시하도록 한다.
+   */
+  store._renditionDisplayReady = false;
+
   const savedCFI = StorageSystem.lsGet('fable_cfi_' + store.bookKey, '');
   rendition.display(savedCFI || undefined)
     .then(() => {
+      store._renditionDisplayReady = true;
       LoadingOverlay.hide();
       _resizeRenditionToViewport(rendition, viewport);
       if (savedCFI) Toast.show('이전에 읽던 위치에서 시작합니다.', 'success');
@@ -952,10 +1094,15 @@ function _updateArrowState(location) {
 export async function destroyCurrentRenditionContext() {
   await StorageSystem.flushProgressNow();
 
+  store._renditionDisplayReady = false;
+
   deps.ReadingStatsTracker.stopSession();
   WPMTracker.stopSession();
   AutoScrollDriver.stop();
   EyeProtectTimer.stop();
+  /* [버그 수정 — A-6] 좀비 TTS 오디오 정리 — speechSynthesis.cancel() +
+     isTtsPlaying 상태 복원을 보장한다. */
+  try { deps.stopTTS(); } catch (_) {}
 
   NavGuard.destroy();
   deps.SearchEngine.destroy();
@@ -1072,47 +1219,101 @@ export async function seekToPercent(pct) {
 
 /* ══════════════════════════════════════════════════════════════════
    NavGuard — 페이지 네비게이션 뮤텍스 + 리사이즈 + 터치
+
+   [🚨 핵심 버그 수정] "화면만 들썩이고 페이지가 넘어가지 않는 현상"
+   ─────────────────────────────────────────────────────────────────
+   원인 1) acquire()가 navigating = true 락을 건 뒤, EpubJS 내부 오류나
+           도서 경계선(첫/마지막 페이지) 도달 시 'relocated' 이벤트가
+           발생하지 않으면 release()가 영원히 호출되지 않아 락이 고정
+           (Stuck) 되었다. → 이후 모든 prev()/next() 호출이 pending에만
+           누적되고 실제 페이지 전환은 멈춘 것처럼 보이는 현상의 직접
+           원인. acquire() 시 setTimeout 기반 안전 타임아웃(400ms)을
+           반드시 동반하여, relocated가 오지 않아도 자동으로 락을 해제한다.
+   원인 2) #viewer-viewport / #screen-viewer 컨테이너에 명시적
+           overflow:hidden이 강제되지 않아, iframe 포커스 이동 시
+           브라우저가 자체적으로 일으키는 미세 스크롤(Scroll Into View)이
+           "화면이 들썩이는" 잔상으로 인지되었다. init() 시점에
+           setProperty('overflow','hidden','important')로 물리적으로
+           차단한다.
    ══════════════════════════════════════════════════════════════════ */
 export const NavGuard = (() => {
-  let navigating     = false;
-  let pending        = null;
-  let resizeObs      = null;
-  let resizeTimer    = null;
-  let cfiSnap        = '';
-  let touchStartX    = 0;
-  let touchStartY    = 0;
-  let touchStartTime = 0;
-  let gestureAxis    = null;
-  let _atStart       = false;
-  let _atEnd         = false;
+  const ACQUIRE_TIMEOUT_MS = 400; /* [핵심 수정] 락 안전 탈출 타임아웃 */
 
+  let navigating      = false;
+  let pending         = null;
+  let resizeObs       = null;
+  let resizeTimer     = null;
+  let acquireTimeoutId = null;   /* [핵심 수정] 타임아웃 핸들 추적 */
+  let cfiSnap         = '';
+  let touchStartX     = 0;
+  let touchStartY     = 0;
+  let touchStartTime  = 0;
+  let gestureAxis     = null;
+  let _atStart        = false;
+  let _atEnd          = false;
+  let _scrollLockApplied = false;
+
+  /*
+   * [핵심 수정] acquire() — 안전 타임아웃 탈출구 내장
+   * ─────────────────────────────────────────────────────────────
+   * navigating = true로 락을 거는 동시에, ACQUIRE_TIMEOUT_MS 이내에
+   * onRelocated()를 통한 정상 release()가 오지 않으면 자동으로
+   * 락을 풀어 다음 탐색을 허용한다. 정상 흐름에서는 relocated가
+   * 항상 먼저 도착해 release()가 타임아웃을 clearTimeout으로
+   * 선제 무효화하므로, 이 타임아웃은 "비정상 상황에서만" 발동하는
+   * 안전망으로 동작하며 정상 페이지 전환 속도에는 영향을 주지 않는다.
+   */
   function acquire() {
     if (navigating) return false;
-    navigating = true; return true;
+    navigating = true;
+    clearTimeout(acquireTimeoutId);
+    acquireTimeoutId = setTimeout(() => {
+      /* relocated 이벤트가 끝내 오지 않은 비정상 상황 — 강제 락 해제 */
+      acquireTimeoutId = null;
+      if (navigating) release();
+    }, ACQUIRE_TIMEOUT_MS);
+    return true;
   }
+
   function release() {
+    clearTimeout(acquireTimeoutId);
+    acquireTimeoutId = null;
     navigating = false;
     if (pending) {
       const p = pending; pending = null;
       p === 'next' ? next() : prev();
     }
   }
+
   function onRelocated(location) {
     release();
     if (location) { _atStart = !!location.atStart; _atEnd = !!location.atEnd; }
   }
+
   function _setArrows(en) {
     DOMProxy.get('arrow-prev').style.pointerEvents = en ? '' : 'none';
     DOMProxy.get('arrow-next').style.pointerEvents = en ? '' : 'none';
   }
 
+  /*
+   * [버그 수정 — A-10] 역방향 무한 페이지 탐색 바운드 체크
+   * ─────────────────────────────────────────────────────────────
+   * 첫 페이지에서 prev(), 마지막 페이지에서 next() 호출 시 EpubJS에
+   * 무의미한 탐색 요청을 보내지 않고 즉시 차단한다. 이전에는 경계에서
+   * 호출이 그대로 rendition.prev()/next()로 전달되어 내부적으로
+   * relocated가 발생하지 않는 경우가 있었는데, 이는 원인 1의 락
+   * 고정 현상을 유발하는 또 다른 트리거였다. 토스트로 사용자에게
+   * "더 이상 진행할 수 없음"을 알려 들썩임을 의도된 피드백으로 인지시킨다.
+   */
   async function prev() {
-    if (!store.rendition) return;
+    if (!store.rendition || !store._renditionDisplayReady) return;
+    if (_atStart) { _playBounce('prev'); Toast.show('첫 페이지입니다.', 'info'); return; }
     if (!acquire()) { pending = 'prev'; return; }
     try { await store.rendition.prev(); } catch (_) { release(); }
   }
   async function next() {
-    if (!store.rendition) return;
+    if (!store.rendition || !store._renditionDisplayReady) return;
+    if (_atEnd) { _playBounce('next'); Toast.show('마지막 페이지입니다.', 'info'); return; }
     if (!acquire()) { pending = 'next'; return; }
     try { await store.rendition.next(); } catch (_) { release(); }
   }
@@ -1170,39 +1371,114 @@ export const NavGuard = (() => {
     });
   }
 
+  /*
+   * [🚨 핵심 버그 수정] 컨테이너 스크롤 방어
+   * ─────────────────────────────────────────────────────────────
+   * #screen-viewer / #viewer-viewport에 자바스크립트로
+   * overflow:hidden !important를 강제 적용한다. iframe으로 포커스가
+   * 이동할 때 브라우저가 자체적으로 수행하는 "Scroll Into View" 동작이
+   * 부모 컨테이너를 미세하게 스크롤시켜 페이지 전환과 무관하게 화면이
+   * 들썩이는 잔상을 일으키는데, CSS만으로는 일부 브라우저에서 우선순위가
+   * 밀리는 경우가 있어 인라인 style.setProperty + !important로
+   * 물리적으로 덮어쓴다. init()에서 1회 적용되며 destroy() 시에는
+   * 복원하지 않는다(뷰어 화면 자체가 숨김 처리되므로 무해하며, 다음
+   * init() 호출 시 다시 동일하게 강제된다).
+   */
+  function _applyScrollLock() {
+    if (_scrollLockApplied) return;
+    const targets = ['screen-viewer', 'viewer-viewport'];
+    targets.forEach(id => {
+      const el = DOMProxy.get(id);
+      if (el && el !== DOMProxy.VOID_NODE && el.style?.setProperty) {
+        try { el.style.setProperty('overflow', 'hidden', 'important'); } catch (_) {}
+      }
+    });
+    _scrollLockApplied = true;
+  }
+
   function _initResize(rendition) {
     const vp = DOMProxy.get('viewer-viewport');
     if (!DOMProxy.exists('viewer-viewport') || typeof ResizeObserver === 'undefined') return;
 
+    /*
+     * [버그 수정 — A-7] ResizeObserver loop limit exceeded 방지
+     * ─────────────────────────────────────────────────────────────
+     * ResizeObserver 콜백 내부에서 곧바로 레이아웃에 영향을 주는
+     * DOM 조작(ResizeMask.show() 등)을 수행하면, 같은 프레임 내에서
+     * 옵저버가 관찰 중인 요소의 크기가 다시 변경되어 "ResizeObserver
+     * loop completed with undelivered notifications" 경고/예외가
+     * 발생할 수 있다. requestAnimationFrame으로 한 틱 미뤄 옵저버의
+     * 통지 사이클이 완전히 끝난 뒤에 레이아웃을 변경하도록 디바운싱한다.
+     */
+    let rafId = null;
     resizeObs = new ResizeObserver(() => {
       if (!store.rendition || !store.isViewerOpen) return;
       if (store.currentCFI) cfiSnap = store.currentCFI;
-      ResizeMask.show();
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(async () => {
-        if (!store.rendition || !store.isViewerOpen) { ResizeMask.hide(); return; }
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        ResizeMask.show();
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(async () => {
+          if (!store.rendition || !store.isViewerOpen) { ResizeMask.hide(); return; }
 
-        const centerCfi = CFIPrecisionGuard.snapCenterCfi();
-        const targetCfi = centerCfi || cfiSnap;
+          const centerCfi = CFIPrecisionGuard.snapCenterCfi();
+          const targetCfi = centerCfi || cfiSnap;
 
-        let width = 0, height = 0;
-        try {
-          const r = vp.getBoundingClientRect?.();
-          if (r) { width = Math.floor(r.width); height = Math.floor(r.height); }
-        } catch (_) {}
-        if (width < 2 || height < 2) { ResizeMask.hide(); return; }
+          let width = 0, height = 0;
+          try {
+            const r = vp.getBoundingClientRect?.();
+            if (r) { width = Math.floor(r.width); height = Math.floor(r.height); }
+          } catch (_) {}
+          if (width < 2 || height < 2) { ResizeMask.hide(); return; }
 
-        try {
-          navigating = false; pending = null;
-          rendition.resize(width, height);
-          await new Promise(r => requestAnimationFrame(r));
-          if (targetCfi) await rendition.display(targetCfi).catch(() => {});
-        } catch (_) {}
-        ResizeMask.hide();
-      }, 160);
+          try {
+            navigating = false; pending = null;
+            clearTimeout(acquireTimeoutId); acquireTimeoutId = null;
+            rendition.resize(width, height);
+            await new Promise(r => requestAnimationFrame(r));
+            if (targetCfi) await rendition.display(targetCfi).catch(() => {});
+          } catch (_) {}
+          ResizeMask.hide();
+        }, 160);
+      });
     });
     resizeObs.observe(vp);
     ResourceRegistry.addResizeObserver(resizeObs);
+  }
+
+
+  /*
+   * [버그 수정 — C-4] 페이지 넘김 임계치 시각화 드래그 제스처
+   * ─────────────────────────────────────────────────────────────
+   * 마우스/터치로 화면을 쓸어 넘길 때, 실제 페이지가 넘어가는
+   * 임계 구역(SWIPE_MIN)에 다가갈수록 진행 방향 가장자리에 동적
+   * 알파 마스크가 점진적으로 짙어지는 시각 피드백을 제공한다.
+   * 임계치를 넘으면 마스크가 가득 차며, 손을 떼는 순간 자연스럽게
+   * 사라진다. 순수 CSS 변수(opacity)만 갱신하므로 레이아웃에
+   * 영향을 주지 않아 메인 스레드 부담이 거의 없다.
+   */
+  let _thresholdMaskEl = null;
+  function _ensureThresholdMask() {
+    if (_thresholdMaskEl) return _thresholdMaskEl;
+    const vp = DOMProxy.get('viewer-viewport');
+    if (!vp || vp === DOMProxy.VOID_NODE) return null;
+    const mask = document.createElement('div');
+    mask.className = 'fable-swipe-threshold-mask';
+    vp.appendChild(mask);
+    _thresholdMaskEl = mask;
+    return mask;
+  }
+  function _updateThresholdMask(dx, dir, swipeMin) {
+    const mask = _ensureThresholdMask();
+    if (!mask) return;
+    const ratio = Math.min(1, dx / swipeMin);
+    mask.style.setProperty('--swipe-edge', dir === 'next' ? 'right' : 'left');
+    mask.style.setProperty('--swipe-alpha', ratio.toFixed(3));
+    mask.classList.add('is-active');
+  }
+  function _hideThresholdMask() {
+    if (_thresholdMaskEl) _thresholdMaskEl.classList.remove('is-active');
   }
 
   function _initTouch() {
@@ -1235,9 +1511,13 @@ export const NavGuard = (() => {
         const now = Date.now(), dt = now - lastT;
         if (dt > 0) velocity = (cx - lastX) / dt;
         lastX = cx; lastT = now;
+        /* [C-4] 진행 방향 판정 후 임계치 마스크 갱신 */
+        const dir = (cx - touchStartX) < 0 ? 'next' : 'prev';
+        _updateThresholdMask(dx, dir, SWIPE_MIN);
       }
     };
     const onEnd = (e) => {
+      _hideThresholdMask();
       if (gestureAxis !== 'x') return;
       const elapsed = Date.now() - touchStartTime;
       const deltaX  = e.changedTouches[0].clientX - touchStartX;
@@ -1265,13 +1545,21 @@ export const NavGuard = (() => {
   function init(rendition) {
     navigating = false; pending = null; gestureAxis = null;
     _atStart = false; _atEnd = false;
+    clearTimeout(acquireTimeoutId); acquireTimeoutId = null;
+    _applyScrollLock();
     _initResize(rendition);
     _initTouch();
   }
   function destroy() {
     if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
     clearTimeout(resizeTimer);
+    clearTimeout(acquireTimeoutId); acquireTimeoutId = null;
     navigating = false; pending = null;
+    _scrollLockApplied = false;
+    /* [C-4] 임계치 마스크 DOM 정리 — viewer-viewport 자체가
+       destroyCurrentRenditionContext에서 innerHTML='' 처리되므로
+       참조만 초기화하면 충분하다. */
+    _thresholdMaskEl = null;
   }
 
   return { init, destroy, prev, next, onRelocated };

@@ -84,6 +84,8 @@ import {
   MetadataEditor, AnnotationExporter, LibraryFullTextSearch, CloudBackup, Pomodoro,
   ReadingReport, OnboardingGuide,
   QuickSettingsPopover, // <-- v5.0 맥락형 빠른 설정 팝오버
+  QuickSettingsHint,    // <-- [버그 수정 C-7] 첫 뷰어 진입 시 팝오버 안내
+  PageTransitionEngine, // <-- [v5.0] 고도화 #6/#8 — will-change 동적 동기화
 } from './ui/viewer.js';
 
 import {
@@ -106,10 +108,156 @@ function _envMode() {
 
 /* ══════════════════════════════════════════════════════════════════
    §32. 키보드 단축키
+
+   [🚨 핵심 버그 수정] 이중 키보드 이벤트 버블링 차단
    ─────────────────────────────────────────────────────────────────
+   iframe 내부(rendition.on('keydown', ...))와 메인 윈도우
+   (document.addEventListener('keydown', handleKeyDown)) 양쪽에서
+   동일한 ArrowLeft/ArrowRight 입력이 중복 처리되거나, 브라우저 고유
+   스크롤 동작과 충돌해 "화면만 들썩이는" 현상의 보조 원인이 되었다.
+   e.preventDefault() 만으로는 이미 상위로 전파된 네이티브 스크롤
+   유발 동작(예: 포커스 이동에 따른 scrollIntoView)을 막지 못하는
+   경우가 있어, stopPropagation() + stopImmediatePropagation() 까지
+   체인으로 호출하여 동일 타깃에 등록된 다른 리스너로의 전파와 상위
+   전파를 모두 차단한다.
+
    [v4.2 가드] 전문 검색 활성 상태 또는 검색 모달 내 인풋 포커스 중에는
    Space·방향키 이벤트를 preventDefault 없이 즉시 return 한다.
+
+   [버그 수정 — A-4] Active Element 예외 처리 강화
+   ─────────────────────────────────────────────────────────────────
+   포커스가 input/textarea 뿐 아니라 contenteditable 요소, 또는
+   커스텀 셀렉터 팝업(quick-settings-popover, context-menu 등) 내부에
+   있을 때도 방향키/Space가 페이지 탐색으로 오작동하지 않도록
+   document.activeElement 기반 검사를 전면 강화한다.
    ══════════════════════════════════════════════════════════════════ */
+function _isEditableActiveElement() {
+  const ae = document.activeElement;
+  if (!ae) return false;
+  const tag = ae.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  /* [A-4] contenteditable 요소 (메모 입력 등) 포커스 가드 */
+  if (ae.isContentEditable) return true;
+  try {
+    if (typeof ae.closest === 'function' &&
+        ae.closest('[contenteditable="true"], [contenteditable=""]')) return true;
+  } catch (_) {}
+  return false;
+}
+
+function _isInsideCustomPopup() {
+  const ae = document.activeElement;
+  if (!ae || typeof ae.closest !== 'function') return false;
+  /* [A-4] 커스텀 셀렉터 팝업(빠른 설정 팝오버, 컨텍스트 메뉴, FTS 모달 등)
+     내부에 포커스가 있을 때는 단축키를 페이지 탐색으로 해석하지 않는다. */
+  try {
+    return !!ae.closest('#quick-settings-popover, #context-menu, #fts-modal, #search-modal, #pomodoro-popup, #onboarding-overlay');
+  } catch (_) { return false; }
+}
+
+/*
+ * ══════════════════════════════════════════════════════════════════
+ * [v5.0 신규 — 고도화 #10] Escape 키 전역 모달 체인 우선순위 큐
+ * ──────────────────────────────────────────────────────────────────
+ * 기존 한계: handleKeyDown의 'Escape' 분기가 if문을 위에서부터 순서대로
+ * 검사하는 하드코딩된 체인이었다. 이 방식은 두 가지 문제를 안고 있다:
+ *   1) 새로운 모달/팝업이 추가될 때마다 "어느 if문 사이에 끼워 넣어야
+ *      논리적으로 옳은 닫힘 순서가 되는지"를 매번 사람이 판단해 코드를
+ *      직접 편집해야 했다 — 우선순위가 코드 작성 순서에 암묵적으로
+ *      흩어져 있어 유지보수 시 실수 위험이 크다.
+ *   2) pomodoro-popup, context-menu처럼 _isInsideCustomPopup()의
+ *      예외 목록에는 포함되어 있지만 Escape 분기 자체에는 닫는 로직이
+ *      없는 모달이 존재해, 해당 팝업에 포커스가 있을 때 Escape를 눌러도
+ *      아무 반응이 없는 누락 사례가 있었다.
+ *
+ * 해결: 모든 닫을 수 있는 오버레이를 ESCAPE_LAYER_REGISTRY 배열에
+ * { id, priority, isOpen(), close() } 형태로 선언적으로 등록한다.
+ * Escape 키 입력 시:
+ *   1) isOpen()이 true인 엔트리만 후보로 추린다.
+ *   2) priority 내림차순(숫자가 클수록 시각적으로 더 위 — 실제 CSS
+ *      z-index 값과 동일한 의미 체계)으로 정렬한다.
+ *   3) 가장 위에 있는 엔트리 단 하나만 close()를 호출한다.
+ * 이로써 "어떤 레이어가 가장 위에 떠 있는가"라는 순수한 우선순위
+ * 데이터만으로 닫힘 순서가 자동 결정되며, 새 모달 추가 시에는 배열에
+ * 항목 하나를 추가하는 것만으로 충분하다 — if-체인 순서를 다시 검토할
+ * 필요가 없다. 후보가 전혀 없으면(모든 오버레이가 닫힌 상태) 뷰어
+ * 종료 확인 다이얼로그로 폴백한다(기존 동작 보존).
+ * ══════════════════════════════════════════════════════════════════ */
+const ESCAPE_LAYER_REGISTRY = [
+  {
+    id: 'quick-settings-popover',
+    priority: 9950, /* 뷰어 탭 팝오버 — 가장 자주 열리는 경량 오버레이, 최상단 */
+    isOpen:  () => !!store.quickPopoverOpen,
+    close:   () => QuickSettingsPopover.close(),
+  },
+  {
+    id: 'context-menu',
+    priority: 9900,
+    isOpen:  () => DOMProxy.exists('context-menu')
+                   && DOMProxy.get('context-menu').style.display !== 'none',
+    /* viewer.js의 hideMenu()와 동일한 트랜지션 패턴(슬라이드 다운 후
+       280ms 뒤 display:none)을 따라 즉시 끊기는 느낌 없이 닫는다. */
+    close:   () => {
+      const m = DOMProxy.get('context-menu');
+      m.classList.remove('slide-up');
+      setTimeout(() => { m.style.display = 'none'; }, 280);
+    },
+  },
+  {
+    id: 'pomodoro-popup',
+    priority: 9800,
+    isOpen:  () => DOMProxy.get('pomodoro-popup')?.style.display === 'flex',
+    close:   () => { Pomodoro.pause(); DOMProxy.get('pomodoro-popup').style.display = 'none'; },
+  },
+  {
+    id: 'fts-modal',
+    priority: 600,
+    isOpen:  () => DOMProxy.get('fts-modal')?.style.display === 'flex',
+    close:   () => { DOMProxy.get('fts-modal').style.display = 'none'; store.isSearching = false; },
+  },
+  {
+    id: 'search-modal',
+    priority: 500,
+    isOpen:  () => DOMProxy.get('search-modal')?.style.display === 'flex',
+    close:   () => { DOMProxy.get('search-modal').style.display = 'none'; store.isSearching = false; },
+  },
+  {
+    id: 'stats-modal',
+    priority: 400,
+    isOpen:  () => DOMProxy.get('stats-modal')?.style.display === 'flex',
+    close:   () => { DOMProxy.get('stats-modal').style.display = 'none'; },
+  },
+  {
+    id: 'settings-panel',
+    priority: 300,
+    isOpen:  () => !!store.isSettingsOpen,
+    close:   () => { store.isSettingsOpen = false; },
+  },
+  {
+    id: 'toc-sidebar',
+    priority: 200,
+    isOpen:  () => !!store.isTocOpen,
+    close:   () => { store.isTocOpen = false; },
+  },
+];
+
+/**
+ * 현재 열려 있는 오버레이 중 우선순위(priority)가 가장 높은 단 하나만
+ * 닫는다. 닫을 대상이 없으면 false를 반환해 호출부가 폴백 동작(뷰어
+ * 종료 확인)을 수행할 수 있게 한다.
+ */
+function _closeTopmostOverlay() {
+  const openLayers = ESCAPE_LAYER_REGISTRY.filter(layer => {
+    try { return layer.isOpen(); } catch (_) { return false; }
+  });
+  if (!openLayers.length) return false;
+
+  openLayers.sort((a, b) => b.priority - a.priority);
+  const top = openLayers[0];
+  try { top.close(); } catch (e) { ErrorBoundary.handle('global', e, 'escapeLayer:' + top.id); }
+  return true;
+}
+
 function handleKeyDown(e) {
   const viewer = DOMProxy.get('screen-viewer');
   if (!DOMProxy.exists('screen-viewer') || viewer.style.display === 'none') return;
@@ -124,35 +272,54 @@ function handleKeyDown(e) {
     return false;
   };
 
+  /* [A-4] 입력 가능 요소 또는 커스텀 팝업에 포커스가 있으면 단축키를
+     완전히 무시하고 네이티브 동작(타이핑 등)을 그대로 허용한다. */
+  if (_isEditableActiveElement() || _isInsideCustomPopup()) {
+    if (e.key === 'Escape') {
+      /* Escape는 입력 중에도 모달/팝업을 닫을 수 있어야 하므로 예외적으로 통과 */
+    } else {
+      return;
+    }
+  }
+
   switch (e.key) {
     case 'ArrowRight': case 'ArrowDown': case ' ':
       if (_isSearchActive()) return;
-      e.preventDefault(); NavGuard.next(); break;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      NavGuard.next(); break;
     case 'ArrowLeft': case 'ArrowUp': case 'Backspace':
       if (_isSearchActive()) return;
-      e.preventDefault(); NavGuard.prev(); break;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      NavGuard.prev(); break;
     case 'Escape':
-      if (store.quickPopoverOpen) { QuickSettingsPopover.close(); break; }
-      if (store.isSettingsOpen) { store.isSettingsOpen = false; break; }
-      if (store.isTocOpen)      { store.isTocOpen      = false; break; }
-      if (DOMProxy.get('search-modal')?.style.display === 'flex') {
-        DOMProxy.get('search-modal').style.display = 'none';
-        store.isSearching = false;
-        break;
-      }
-      if (DOMProxy.get('fts-modal')?.style.display === 'flex') {
-        DOMProxy.get('fts-modal').style.display = 'none';
-        store.isSearching = false;
-        break;
-      }
-      if (DOMProxy.get('stats-modal')?.style.display === 'flex') {
-        DOMProxy.get('stats-modal').style.display = 'none'; break;
-      }
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      /* [v5.0] 우선순위 큐 기반 — 가장 위에 떠 있는 오버레이 하나만
+         닫는다. 닫을 오버레이가 전혀 없으면 뷰어 종료 확인으로 폴백. */
+      if (_closeTopmostOverlay()) break;
       if (confirm('뷰어를 닫고 서재로 돌아가시겠습니까?')) exitViewer();
       break;
     default: break;
   }
 }
+
+/*
+ * [🚨 핵심 버그 수정 + A-1] iframe 포커스 소실 검증
+ * ─────────────────────────────────────────────────────────────────
+ * 뷰어 내부 iframe을 클릭하면 포커스가 iframe 내부 document로 이동해,
+ * 메인 윈도우(document)에 바인딩된 handleKeyDown이 keydown 이벤트를
+ * 전혀 수신하지 못하는 현상이 발생한다. epub.js는 rendition.on('keydown')
+ * 으로 iframe 내부 이벤트를 별도로 전달해주지만(reader.js에서 처리),
+ * 일부 환경(예: iframe sandbox 제약, 포커스 전환 타이밍)에서는 이 경로도
+ * 누락될 수 있다. 이를 보강하기 위해 iframe에 포커스가 진입할 때마다
+ * 메인 윈도우로 포커스를 즉시 되돌리지는 않되(텍스트 선택/TTS 등 iframe
+ * 내부 상호작용을 방해하면 안 되므로), capture 단계에서 메인 document의
+ * keydown 리스너가 항상 우선 실행되도록 보장한다.
+ * (document.addEventListener의 capture:true 옵션으로 버블링 단계보다
+ *  먼저 가로채어, 이중 처리 시에도 항상 메인 핸들러가 단일 진실
+ *  공급원이 되도록 한다.)
+ */
+
+
 
 /* ══════════════════════════════════════════════════════════════════
    순환 의존성 차단 — reader.js에 UI 콜백 주입
@@ -174,22 +341,41 @@ registerReaderDeps({
     if (navBarsVisible) QuickSettingsPopover.open();
     else QuickSettingsPopover.close();
   },
+  /* [버그 수정 — A-6] 좀비 TTS 오디오 정리 — 뷰어 종료/도서 전환 시
+     reader.js의 destroyCurrentRenditionContext()가 이 콜백을 통해
+     TTSSystem.stop()을 호출하여 speechSynthesis.cancel()을 보장한다. */
+  stopTTS: TTSSystem.stop,
 });
 
 /* ══════════════════════════════════════════════════════════════════
    [v5.0] §ZEN. 젠 모드 오케스트레이션
    ─────────────────────────────────────────────────────────────────
    뷰어 화면이 활성 상태이고 store.fxZenMode === true 일 때,
-   2초(CSS --fx-zen-idle-delay와 동기) 동안 포인터/터치 입력이
-   없으면 body에 zen-mode-active 클래스를 추가하여 상하단 바를
-   CSS transition으로 페이드아웃 한다.
+   설정 가능한 비활동 시간(store.zenIdleDelaySec, 기본 2초) 동안
+   포인터/터치 입력이 없으면 body에 zen-mode-active 클래스를 추가하여
+   상하단 바를 CSS transition으로 페이드아웃 한다.
    포인터 이동/터치 발생 시 클래스를 즉시 제거한다.
+
+   [버그 수정 — C-6] 젠 모드 진입 타이밍 커스텀 제어
+   ─────────────────────────────────────────────────────────────────
+   기존에는 ZEN_DELAY_MS가 2000으로 하드코딩되어 사용자가 진입
+   타이밍을 조절할 방법이 없었다. store.zenIdleDelaySec(설정 패널의
+   슬라이더로 1~10초 범위 조절 가능)을 매 타이머 리셋 시점에 다시
+   읽어, 설정 변경이 다음 비활동 감지부터 즉시 반영되도록 한다.
    ══════════════════════════════════════════════════════════════════ */
 function initZenMode() {
   /* 내부 상태 */
   let _zenTimer       = null;
   let _zenActive      = false;
-  const ZEN_DELAY_MS  = 2000;   /* CSS --fx-zen-idle-delay와 동기화 */
+  const ZEN_DELAY_FALLBACK_MS = 2000; /* CSS --fx-zen-idle-delay 기본값과 동기화 */
+
+  /* [C-6] store.zenIdleDelaySec(초 단위, 사용자 설정)을 ms로 환산.
+     유효하지 않은 값(범위 밖, NaN)이면 기존 기본값(2초)으로 폴백한다. */
+  function _getZenDelayMs() {
+    const sec = Number(store.zenIdleDelaySec);
+    if (!Number.isFinite(sec) || sec < 1 || sec > 10) return ZEN_DELAY_FALLBACK_MS;
+    return Math.round(sec * 1000);
+  }
 
   /* 젠 모드 진입 */
   function _enterZen() {
@@ -217,7 +403,7 @@ function initZenMode() {
 
     _exitZen();
     clearTimeout(_zenTimer);
-    _zenTimer = setTimeout(_enterZen, ZEN_DELAY_MS);
+    _zenTimer = setTimeout(_enterZen, _getZenDelayMs());
   }
 
   /* 활동 감지 이벤트 — 뷰어 iframe 내부 포함 */
@@ -289,6 +475,9 @@ function mountReactiveBinders() {
         try { store.rendition.themes.select(theme === 'custom' ? 'custom' : theme); }
         catch (e) { ErrorBoundary.handle('renderer', e, 'theme:select'); }
         reapplyInlineTheme();
+        /* [버그 수정 — C-8] 다크모드 전환 시 스마트 하이라이터 컬러 보정 —
+           이미 그려진 형광펜을 테마에 맞는 fill/opacity로 재도색한다. */
+        try { AnnotationManager.repaintForTheme(); } catch (_) {}
       });
     }
     DOMProxy.qa('.theme-swatch').forEach(b => {
@@ -339,9 +528,13 @@ function mountReactiveBinders() {
   });
 
   /* [v5.0] 뷰어 종료 시 맥락형 빠른 설정 팝오버 강제 닫기
-     — 서재 화면으로 복귀했는데 팝오버가 잔존하는 현상 방지 */
+     — 서재 화면으로 복귀했는데 팝오버가 잔존하는 현상 방지
+     [버그 수정 — C-7] 뷰어 진입 시에는 QuickSettingsHint를 1회성으로
+     트리거한다. localStorage 가드가 내부에 있어 이미 본 사용자에게는
+     아무 동작도 하지 않는다. */
   ReactiveStore.subscribe('isViewerOpen', (open) => {
     if (!open && store.quickPopoverOpen) QuickSettingsPopover.close();
+    if (open) QuickSettingsHint.maybeShow();
   });
 
   ReactiveStore.subscribe('isTocOpen', (open) => {
@@ -442,10 +635,13 @@ function mountReactiveBinders() {
   /* [v5.0 버그 수정] 독서 리포트 HUD 표시 토글 — 이전에는 store 값만
      바뀌고 실제 #dashboard-section의 표시 여부를 제어하는 구독자가
      없어 토글이 화면에 아무 영향도 주지 못했다. 여기서 실제 DOM
-     반영을 담당한다. */
+     반영을 담당한다.
+     [버그 수정 — C-2] display:none 즉시 전환 대신 .hud-collapsed
+     클래스를 토글하여 fx.css의 max-height/opacity 트랜지션이 적용된
+     슬라이딩 다운/업 아코디언 애니메이션으로 동작하도록 한다. */
   ReactiveStore.subscribe('showDashboardReport', (visible) => {
     if (DOMProxy.exists('dashboard-section'))
-      DOMProxy.get('dashboard-section').style.display = (visible === false) ? 'none' : '';
+      DOMProxy.get('dashboard-section').classList.toggle('hud-collapsed', visible === false);
   });
 
   ReactiveStore.subscribe('ttsVoice', (voiceURI) => {
@@ -710,7 +906,10 @@ function initButtonEventHandlers() {
     }
   }, { passive: true });
 
-  document.addEventListener('keydown', handleKeyDown);
+  /* [🚨 핵심 버그 수정 + A-1] capture:true — iframe 포커스 이동 등으로
+     버블링 단계가 어긋나는 경우에도 메인 핸들러가 항상 우선 가로채도록
+     캡처 단계에서 등록한다. */
+  document.addEventListener('keydown', handleKeyDown, { capture: true });
 
   /* ── 설정 UI 초기화 ── */
   initFontUploader();
@@ -835,9 +1034,30 @@ function _initScrubberTtsBlocker() {
   }, { passive: false });
 }
 
-/* ══════════════════════════════════════════════════════════════════
-   §36-C. Settings UI 동기화 강제 초기화 — [v5.0] FX 체크박스 추가
-   ══════════════════════════════════════════════════════════════════ */
+/*
+ * ══════════════════════════════════════════════════════════════════
+ * §36-C. [v5.0 신규 — 고도화 #8] 설정 동기화 3-Way 바인딩
+ * 파이프라인 단일화
+ * ──────────────────────────────────────────────────────────────────
+ * 기존 한계: _loadStateFromLS()(LS→Store)와 _forceSyncSettingsUI()
+ * (Store→UI)가 부팅 시퀀스에서 별개의 두 호출로 분리되어 있었다.
+ * 두 호출 사이의 짧은 간극에서 다른 비동기 경로(예: ReactiveStore
+ * 구독 콜백, StorageSystem.init() 완료 콜백 등)가 store 값을 먼저
+ * 건드리면, "LS에서 막 복원된 값"과 "화면에 그려질 값"이 어긋나는
+ * 순간이 생길 수 있었다. 또한 각 개별 설정 위젯(슬라이더/스위치)이
+ * change 핸들러 안에서 직접 _saveStateToLS()를 호출하는 분산 패턴은,
+ * 여러 입력이 거의 동시에 바뀔 때 LS 쓰기가 중복 직렬화되는 비효율도
+ * 동반했다.
+ *
+ * 해결: LS→Store(_loadStateFromLS)와 Store→UI(_forceSyncSettingsUI)를
+ * _atomicSyncSettingsPipeline() 단일 함수로 묶어 항상 같은 순서로
+ * 동기 실행되도록 원자성(Atomicity)을 보장한다. 이 함수가 시작되면
+ * 중간에 다른 코드가 끼어들 수 없는 순수 동기 호출 체인이므로(await
+ * 지점이 없음), "부분적으로만 반영된" 상태가 외부에 노출될 가능성이
+ * 구조적으로 제거된다. 부팅 시퀀스뿐 아니라, 향후 "설정 초기화" 같은
+ * 기능이 추가되어 LS를 다시 읽고 UI를 강제 재동기화해야 할 때도 항상
+ * 이 단일 진입점을 통하도록 한다.
+ * ══════════════════════════════════════════════════════════════════ */
 function _forceSyncSettingsUI() {
   setTextSafe(DOMProxy.get('font-size-display'), `${store.fontSize}%`);
   DOMProxy.qa('[data-lh]').forEach(b => {
@@ -888,6 +1108,10 @@ function _forceSyncSettingsUI() {
     b.classList.toggle('active', ok); b.setAttribute('aria-checked', String(ok));
   });
 
+  /* [v5.0 — 고도화 #6 연계] 페이지 전환 모드에 맞춰 viewer-viewport의
+     will-change 가속 힌트를 부팅 시점에도 즉시 동기화한다. */
+  PageTransitionEngine.syncHardwareAcceleration(store.pageTransition || 'fade');
+
   /* [v5.0] FX 토글 체크박스 동기화 */
   const fxMap = {
     'fx-toggle-animation': 'fxAnimation',
@@ -905,9 +1129,35 @@ function _forceSyncSettingsUI() {
 
   /* [v5.0 버그 수정] 독서 리포트 HUD 표시 상태 부팅 시 즉시 동기화
      — ReactiveStore.subscribe는 향후 변경에만 반응하므로, 부팅 시점의
-     초기 값은 명시적으로 한 번 적용해야 한다. */
-  if (DOMProxy.exists('dashboard-section'))
-    DOMProxy.get('dashboard-section').style.display = (store.showDashboardReport === false) ? 'none' : '';
+     초기 값은 명시적으로 한 번 적용해야 한다.
+     [버그 수정 — C-2] 부팅 시 접힌 상태라면 애니메이션 없이 즉시
+     max-height:0으로 시작하도록 transition을 임시로 끈 뒤 한 프레임
+     후 복원한다 — 페이지 로드 직후 불필요한 슬라이드 모션이 보이는
+     것을 방지한다. */
+  if (DOMProxy.exists('dashboard-section')) {
+    const dashEl = DOMProxy.get('dashboard-section');
+    const collapsed = store.showDashboardReport === false;
+    if (collapsed) {
+      dashEl.style.transition = 'none';
+      dashEl.classList.add('hud-collapsed');
+      requestAnimationFrame(() => { dashEl.style.transition = ''; });
+    } else {
+      dashEl.classList.remove('hud-collapsed');
+    }
+  }
+}
+
+/**
+ * [v5.0 신규 — 고도화 #8] LS → Store → UI 원자적 동기화 진입점.
+ * 항상 이 함수를 통해서만 "설정 전체 재동기화"를 수행하도록 강제하여,
+ * _loadStateFromLS()와 _forceSyncSettingsUI()가 분리 호출되며 발생할
+ * 수 있는 중간 불일치 윈도우를 구조적으로 차단한다. 두 단계 모두
+ * 동기 함수이므로 이 함수 실행 도중에는 다른 매크로/마이크로태스크가
+ * 끼어들 수 없다(자바스크립트 단일 스레드 실행 모델 + await 부재).
+ */
+function _atomicSyncSettingsPipeline() {
+  _loadStateFromLS();      /* 1) LS → Store */
+  _forceSyncSettingsUI();  /* 2) Store → UI (애니메이션/가속 힌트까지 포함) */
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -942,6 +1192,15 @@ function initStickyHeader() {
     else if (y > lastY + 4) topbar.classList.add('topbar-hidden');
     else if (y < lastY - 4) topbar.classList.remove('topbar-hidden');
     lastY = y;
+    /*
+     * [버그 수정 — D-9] 스크롤 시에만 헤더 하단 경계선 노출
+     * ─────────────────────────────────────────────────────────────
+     * fx.css의 #library-topbar.is-scrolled 규칙이 본문과의 시각적
+     * 경계(글래스모피즘 보더 + 미세 그림자)를 그려준다. 4px의 작은
+     * 임계값을 둔 것은 스크롤 0 근처에서 미세한 휠 떨림으로 클래스가
+     * 깜빡이는 것을 방지하기 위함이다.
+     */
+    topbar.classList.toggle('is-scrolled', y > 4);
   };
   body.addEventListener('scroll', onScroll, { passive: true });
 }
@@ -1003,8 +1262,9 @@ async function initializeSystemCore() {
   await StorageSystem.init()?.catch(err => ErrorBoundary.handle('storage', err, 'init'));
 
   mountReactiveBinders();
-  _loadStateFromLS();
-  _forceSyncSettingsUI();
+  /* [v5.0] LS→Store→UI 원자적 동기화 — 분리 호출로 인한 중간 불일치
+     윈도우를 차단한다(고도화 #8). */
+  _atomicSyncSettingsPipeline();
   initButtonEventHandlers();
   initOfflineBanner();
   initContextMenu();

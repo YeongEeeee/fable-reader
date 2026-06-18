@@ -37,10 +37,14 @@
    §1. CSS 커스텀 프로퍼티 — FX 제어 토큰
    ══════════════════════════════════════════════════════════════════ */
 :root {
-  /* 글래스모피즘 */
-  --fx-glass-blur:        12px;
-  --fx-glass-bg-light:    rgba(255, 255, 255, 0.72);
-  --fx-glass-bg-dark:     rgba(20, 18, 16, 0.76);
+  /* 글래스모피즘
+     [버그 수정 — D-2] 백그라운드 본문 글자가 비쳐서 팝오버 문자가
+     잘 안 보이는 가독성 문제를 해소하기 위해 blur를 12px → 24px로
+     강화하고, 반투명 마스크 레이어의 불투명도(베이스 알파)를 함께
+     끌어올려 배경 콘텐츠의 잔상을 더 확실히 차단한다. */
+  --fx-glass-blur:        24px;
+  --fx-glass-bg-light:    rgba(255, 255, 255, 0.82);
+  --fx-glass-bg-dark:     rgba(20, 18, 16, 0.86);
   --fx-glass-border:      rgba(255, 255, 255, 0.22);
   --fx-glass-shadow:      0 8px 32px rgba(0, 0, 0, 0.14), 0 1.5px 4px rgba(0,0,0,0.08);
 
@@ -79,10 +83,13 @@
   --fx-pomodoro-color:    #e85d3a;
   --fx-pomodoro-track:    rgba(232,93,58,0.18);
 
-  /* 세피아 스켈레톤 */
+  /* 세피아 스켈레톤
+     [버그 수정 — D-1] 기존 #e2c48a는 주변 세피아 톤보다 채도가 크게
+     높아 종이 질감 배경 위에서 시각적으로 튀어 보였다. 동일 색조를
+     유지한 채 채도와 명도를 낮춰 저명도 앰버로 재조정했다. */
   --fx-skel-sepia-1:  #ede4d4;
   --fx-skel-sepia-2:  #d8ccb8;
-  --fx-skel-amber:    #e2c48a;
+  --fx-skel-amber:    #c9ae7a;
   --fx-skel-warm:     #f0e8d4;
 
   /* 태그 폴더 */
@@ -139,10 +146,26 @@
   background: var(--fx-glass-bg-light);
   backdrop-filter: blur(var(--fx-glass-blur)) saturate(160%);
   -webkit-backdrop-filter: blur(var(--fx-glass-blur)) saturate(160%);
-  border-bottom: 1px solid var(--fx-glass-border);
+  /*
+   * [버그 수정 — D-9] 서재 상단 고정 헤더 경계 가시성
+   * ─────────────────────────────────────────────────────────────
+   * 기존에는 border-bottom이 스크롤 여부와 무관하게 항상 고정되어
+   * 있어, 맨 위(스크롤 0)에서도 본문과의 경계가 늘 동일하게 보여
+   * "스크롤 시에만 분리감을 준다"는 공간적 레이어 분리 의도가
+   * 드러나지 않았다. 정지 상태에서는 보더를 투명하게 두고, 본문을
+   * 스크롤할 때(main.js의 initStickyHeader가 부여하는 .is-scrolled
+   * 클래스)만 미세한 글래스모피즘 보더 라인이 페이드인하도록 한다.
+   */
+  border-bottom: 1px solid transparent;
   transition: background var(--fx-anim-normal) ease,
               transform  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1),
-              opacity    var(--fx-anim-normal) ease;
+              opacity    var(--fx-anim-normal) ease,
+              border-color 0.22s ease;
+}
+
+#library-topbar.is-scrolled {
+  border-bottom-color: var(--fx-glass-border);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.04);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -264,6 +287,15 @@ body:not(.zen-mode-active) #viewer-bottom-bar,
   white-space: nowrap;
   max-width: 220px;
   text-align: center;
+  /*
+   * [버그 수정 — C-10] 스크러버 툴팁 마우스 트래커 동기화
+   * ─────────────────────────────────────────────────────────────
+   * mousemove마다 left가 즉시(discrete) 갱신되어 다소 뚝뚝 끊기는
+   * 느낌을 주었다. left에 짧은 ease-out 트랜지션을 적용해 마우스
+   * 커서를 "자석처럼" 부드럽게 따라가는 느낌을 만든다. 너무 느리면
+   * 손가락/커서보다 뒤처져 보이므로 80ms의 짧은 지속시간을 사용한다.
+   */
+  transition: left 0.08s ease-out, opacity 0.12s ease;
 }
 #slider-tooltip::after {
   content: '';
@@ -532,6 +564,17 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 
 /* ══════════════════════════════════════════════════════════════════
    §12. 페이지 전환 효과
+
+   [v5.0 신규 — 고도화 #6] CSS 하드웨어 가속 강제 스위칭
+   ─────────────────────────────────────────────────────────────────
+   slide/flip3d 모드는 transform 기반 애니메이션이므로 will-change를
+   명시해 자바스크립트 연산 부담을 줄이고 GPU 합성 경로를 강제한다.
+   fade 모드는 opacity 단독 전환으로 합성 비용이 낮아 will-change를
+   생략한다(불필요한 레이어 상시 점유를 피하기 위한 선택적 적용).
+   동적 주입(PageTransitionEngine.syncHardwareAcceleration)과 함께,
+   CSS 클래스 레벨에서도 동일 의도를 선언적으로 보강해 epub.js가
+   직접 생성/제거하는 .epubjs-view 요소(JS 오버레이 레이어와는 별개
+   레이어)에도 가속 힌트가 누락 없이 적용되도록 이중 보장한다.
    ══════════════════════════════════════════════════════════════════ */
 .page-transition-fade .epubjs-view {
   animation: fx-page-fade var(--fx-anim-normal) ease both;
@@ -539,9 +582,11 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 
 .page-transition-slide .epubjs-view--next {
   animation: fx-page-slide-in  var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1) both;
+  will-change: transform, opacity;
 }
 .page-transition-slide .epubjs-view--prev {
   animation: fx-page-slide-out var(--fx-anim-normal) cubic-bezier(0.4,0,0.2,1) both;
+  will-change: transform, opacity;
 }
 
 .page-transition-flip3d .epubjs-view {
@@ -549,6 +594,47 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
   transform-origin: left center;
   transform-style: preserve-3d;
   backface-visibility: hidden;
+  will-change: transform, opacity;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   §12-A. [버그 수정 — C-4] 페이지 넘김 임계치 시각화 드래그 마스크
+   ─────────────────────────────────────────────────────────────────
+   터치/마우스 드래그 거리가 SWIPE_MIN에 가까워질수록 진행 방향
+   가장자리의 그라디언트 알파(--swipe-alpha, 0~1)가 짙어지며 "이만큼
+   더 끌면 페이지가 넘어간다"는 임계 구역을 시각적으로 보여준다.
+   --swipe-edge로 좌/우 방향을 전환하며, 손을 떼면 is-active 클래스가
+   제거되어 트랜지션과 함께 부드럽게 사라진다.
+   ══════════════════════════════════════════════════════════════════ */
+.fable-swipe-threshold-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  --swipe-edge: right;
+  --swipe-alpha: 0;
+  background: linear-gradient(
+    to var(--swipe-edge),
+    rgba(200, 134, 74, calc(var(--swipe-alpha) * 0.28)) 0%,
+    rgba(200, 134, 74, calc(var(--swipe-alpha) * 0.10)) 35%,
+    transparent 65%
+  );
+}
+
+.fable-swipe-threshold-mask.is-active {
+  opacity: 1;
+  transition: none; /* 드래그 중에는 실시간 추적, 손을 뗄 때만 트랜지션 적용 */
+}
+
+[data-theme="dark"] .fable-swipe-threshold-mask {
+  background: linear-gradient(
+    to var(--swipe-edge),
+    rgba(224, 168, 104, calc(var(--swipe-alpha) * 0.32)) 0%,
+    rgba(224, 168, 104, calc(var(--swipe-alpha) * 0.12)) 35%,
+    transparent 65%
+  );
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -669,7 +755,17 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 
 .recent-card:hover {
   transform: translateY(-4px) scale(1.01);
-  box-shadow: 0 12px 32px rgba(0,0,0,0.12);
+  /*
+   * [버그 수정 — D-3] 최근 읽은 책 카드 뷰 슬라이드인 그림자 입체감
+   * ─────────────────────────────────────────────────────────────
+   * 단일 레이어 박스섀도우는 평면적으로 보였다. 거리가 다른 3개의
+   * 가우스 레이어(근접 선명한 그림자 + 중간 확산 + 원거리 부드러운
+   * 앰비언트)를 겹쳐 실제 종이가 살짝 들뜬 듯한 입체감을 만든다.
+   */
+  box-shadow:
+    0 2px 6px rgba(0,0,0,0.08),
+    0 12px 28px rgba(0,0,0,0.12),
+    0 24px 48px rgba(0,0,0,0.08);
 }
 
 /* [이어서 몰입하기] 버튼 */
@@ -832,6 +928,27 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
   transition: none;
 }
 
+/*
+ * [버그 수정 — D-7 부수 조치] suction-flash 애니메이션 복원
+ * ─────────────────────────────────────────────────────────────
+ * uploader.js 인라인 <style>의 중복 .smart-tag-folder 블록을 제거하며
+ * 함께 정의되어 있던 .smart-tag-folder.suction-flash 규칙도 함께
+ * 사라졌다. 드래그앤드롭으로 도서를 태그 폴더에 놓을 때의 "흡입"
+ * 피드백 애니메이션이 끊기지 않도록 이 파일(canonical 소스)에
+ * 동일 키프레임으로 복원한다. @keyframes는 선택자 특정성 경쟁이
+ * 없으므로 uploader.js의 동일 이름 키프레임과 중복 정의되어도
+ * 충돌이나 빌드 오류를 일으키지 않는다.
+ */
+@keyframes fable-suction {
+  0%   { transform: scale(1.08); box-shadow: 0 0 0 3px var(--color-accent,#c47a3b); }
+  60%  { transform: scale(0.92); box-shadow: 0 0 0 6px var(--color-accent,#c47a3b); }
+  100% { transform: scale(1);    box-shadow: none; }
+}
+
+.smart-tag-folder.suction-flash {
+  animation: fable-suction 380ms ease forwards;
+}
+
 .smart-tag-icon  { font-size: 22px; line-height: 1; transition: transform 0.18s ease; }
 .smart-tag-folder:hover .smart-tag-icon { transform: scale(1.15); }
 .smart-tag-name  { font-size: 11.5px; font-weight: 600; text-align: center; line-height: 1.2; }
@@ -936,7 +1053,17 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
   box-shadow: var(--fx-glass-shadow);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.22s ease, transform 0.22s cubic-bezier(0.34,1.4,0.64,1);
+  /*
+   * [버그 수정 — C-1] 글래스모피즘 빠른 설정 패널 슬라이드 피드백 보완
+   * ─────────────────────────────────────────────────────────────
+   * 기존 ease 곡선은 열림/닫힘이 다소 딱딱하게 느껴졌다. opacity와
+   * transform에 서로 다른 이지인아웃 곡선(스프링형 cubic-bezier)을
+   * 적용하여 끊김 없이 부드럽게 튀어나오는 느낌을 강화하고,
+   * will-change로 컴포지터 레이어를 미리 확보해 첫 프레임 끊김을 방지한다.
+   */
+  will-change: opacity, transform;
+  transition: opacity 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+              transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 [data-theme="dark"] .quick-settings-popover {
@@ -1058,15 +1185,35 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 
 /* ══════════════════════════════════════════════════════════════════
    §21. [v5.0] Dashboard HUD 영역
+
+   [버그 수정 — C-2] 독서 리포트 HUD 섹션 부드러운 아코디언 토글
+   ─────────────────────────────────────────────────────────────────
+   기존에는 main.js의 리액티브 바인더가 style.display를 'none'/''으로
+   즉시 전환하여 스위치 조작 시 섹션이 딱딱하게 사라지고 나타났다.
+   #dashboard-section에 max-height + opacity 기반 트랜지션을 적용하고,
+   .hud-collapsed 클래스로 접힌 상태를 표현하도록 변경한다. JS 측에서는
+   display:none 대신 이 클래스를 토글하면 슬라이딩 다운/업 애니메이션이
+   적용된다(display:none 자체는 transition이 불가능한 속성이므로,
+   max-height:0 + overflow:hidden 조합으로 우회한다).
    ══════════════════════════════════════════════════════════════════ */
-#dashboard-hud {
+#dashboard-hud,
+#dashboard-section {
   padding: 16px 0 10px;
-  transition: opacity 0.24s ease, max-height 0.28s cubic-bezier(0.4,0,0.2,1);
+  max-height: 2000px;
+  opacity: 1;
   overflow: hidden;
+  transition: max-height 0.42s cubic-bezier(0.4,0,0.2,1),
+              opacity 0.28s ease,
+              padding 0.32s cubic-bezier(0.4,0,0.2,1);
 }
 
-#dashboard-hud.hud-hidden {
-  display: none !important;
+#dashboard-hud.hud-hidden,
+#dashboard-section.hud-collapsed {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  pointer-events: none;
 }
 
 /* HUD 카드 입장 애니메이션 */
@@ -1076,6 +1223,78 @@ html[data-fx-zen="off"] #screen-viewer.zen-mode-active #viewer-bottom-bar {
 
 .dash-card:nth-child(2) { animation-delay: 0.06s; }
 .dash-card:nth-child(3) { animation-delay: 0.12s; }
+
+/* ══════════════════════════════════════════════════════════════════
+   §22-A. [버그 수정 — C-9] 도서 임포트 드래그앤드롭 피드백
+   ─────────────────────────────────────────────────────────────────
+   파일을 화면 위로 드래그하면 #drag-overlay가 표시되며, 서재 전체
+   레이아웃이 블러 처리되고 투명한 앰버 테두리가 화면을 감싸는
+   직관적인 드롭 피드백을 제공한다. main.js의 dragenter/dragleave/drop
+   핸들러가 #drag-overlay의 style.display를 'flex'/'none'으로
+   전환하며, 이 CSS는 그 표시 상태에 맞춰 시각 효과를 담당한다.
+   ══════════════════════════════════════════════════════════════════ */
+#drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9700;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(200, 134, 74, 0.06);
+  animation: fx-dropzone-pulse 1.6s ease-in-out infinite;
+}
+
+#drag-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border-radius: 24px;
+  border: 3px dashed rgba(200, 134, 74, 0.65);
+  box-shadow: 0 0 0 4px rgba(200, 134, 74, 0.10) inset;
+}
+
+#drag-overlay .drag-overlay-inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 36px;
+  border-radius: 18px;
+  background: var(--fx-glass-bg-light);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid var(--fx-glass-border);
+  box-shadow: var(--fx-glass-shadow);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-accent, #c8864a);
+  text-align: center;
+}
+
+#drag-overlay .drag-overlay-icon {
+  font-size: 32px;
+  line-height: 1;
+}
+
+[data-theme="dark"] #drag-overlay .drag-overlay-inner {
+  background: var(--fx-glass-bg-dark);
+}
+
+/* 서재 본문 레이아웃 블러 — 드래그 중 배경 콘텐츠와 드롭존을
+   시각적으로 분리해 어디에 놓아야 하는지 직관적으로 보여준다. */
+body:has(#drag-overlay[style*="flex"]) #library-topbar,
+body:has(#drag-overlay[style*="flex"]) #library-body {
+  filter: blur(6px) saturate(0.9);
+  transition: filter 0.22s ease;
+}
+
+@keyframes fx-dropzone-pulse {
+  0%, 100% { background: rgba(200, 134, 74, 0.06); }
+  50%      { background: rgba(200, 134, 74, 0.11); }
+}
 
 /* ══════════════════════════════════════════════════════════════════
    §22. [v5.0] 모바일 임포트 버튼

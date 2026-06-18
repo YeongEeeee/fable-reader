@@ -384,7 +384,9 @@ async function runSearchExecution() {
 function injectSearchHighlight(cfi) {
   if (!store.rendition) return;
   try {
-    store.rendition.annotations.add('highlight', cfi, {}, null, 'fable-search-hl');
+    /* [버그 수정 — C-8] 검색 결과 임시 하이라이트도 테마에 맞는
+       명도/투명도로 보정하여 다크 모드에서 과도하게 밝지 않도록 한다. */
+    store.rendition.annotations.add('highlight', cfi, {}, null, 'fable-search-hl', _resolveHighlightStyle('yellow'));
     setTimeout(() => {
       try { store.rendition?.annotations?.remove(cfi, 'highlight'); } catch (_) {}
     }, 3000);
@@ -520,6 +522,99 @@ const OnboardingGuide = (() => {
   }
 
   return { init, rerun };
+})();
+
+/* ══════════════════════════════════════════════════════════
+   §23-B-2. [버그 수정 — C-7] QuickSettingsHint
+   ─────────────────────────────────────────────────────────
+   OnboardingGuide(§23-B)는 서재(업로더) 화면 부팅 시점에 한 번만
+   실행되며, 그 시점에는 #quick-settings-popover가 아직 DOM에
+   존재하지 않는다(뷰어 진입 후 본문 탭 시 동적으로 생성됨).
+   따라서 v5.0 신규 기능인 빠른 설정 팝오버를 신규 유저가 인지할
+   방법이 없었다. 이 모듈은 뷰어가 처음 열렸을 때 1회, 짧은 지연
+   후 QuickSettingsPopover를 자동으로 열어 동일한 마스킹+툴팁
+   디자인 언어로 안내 문구를 보여준 뒤, 일정 시간 후 자동으로
+   팝오버를 닫는다. localStorage 가드로 평생 1회만 노출된다.
+   ══════════════════════════════════════════════════════════ */
+const QuickSettingsHint = (() => {
+  const LS_KEY = 'fable_qsp_hint_shown';
+  let _mask = null, _tooltip = null, _timer = null, _autoCloseTimer = null;
+
+  function _alreadyShown() {
+    try { return localStorage.getItem(LS_KEY) === '1'; } catch (_) { return true; }
+  }
+
+  function _markShown() {
+    try { localStorage.setItem(LS_KEY, '1'); } catch (_) {}
+  }
+
+  function _dismiss() {
+    clearTimeout(_autoCloseTimer);
+    [_mask, _tooltip].forEach(el => {
+      if (!el) return;
+      el.style.opacity = '0';
+      setTimeout(() => { try { el.remove(); } catch (_) {} }, 280);
+    });
+    _mask = null; _tooltip = null;
+    QuickSettingsPopover.close();
+    _markShown();
+  }
+
+  function _render() {
+    const target = document.getElementById('quick-settings-popover');
+    if (!target) return; /* open()이 아직 DOM을 만들지 못한 극단적 타이밍 — 조용히 포기 */
+
+    const rect = target.getBoundingClientRect();
+    const PAD  = 6;
+
+    _mask = document.createElement('div');
+    _mask.id = 'qsp-hint-mask';
+    _mask.style.cssText = [
+      'position:fixed', `top:${rect.top - PAD}px`, `left:${rect.left - PAD}px`,
+      `width:${rect.width + PAD * 2}px`, `height:${rect.height + PAD * 2}px`,
+      'z-index:9810', 'border-radius:24px',
+      'border:2.5px solid var(--color-accent,#c47a3b)',
+      'box-shadow:0 0 0 4000px rgba(0,0,0,0.45)',
+      'pointer-events:none', 'opacity:0',
+      'transition:opacity 280ms ease',
+    ].join(';');
+
+    _tooltip = document.createElement('div');
+    _tooltip.id = 'qsp-hint-tooltip';
+    _tooltip.style.cssText = [
+      'position:fixed', `bottom:${window.innerHeight - rect.top + 14}px`, 'left:50%',
+      'transform:translateX(-50%)', 'z-index:9820',
+      'background:var(--color-surface,#fff)', 'color:var(--color-ink,#1a1814)',
+      'border-radius:12px', 'padding:12px 18px', 'max-width:260px',
+      'box-shadow:0 8px 32px rgba(0,0,0,0.22)', 'font-size:13px', 'line-height:1.55',
+      'text-align:center', 'pointer-events:none', 'opacity:0',
+      'transition:opacity 280ms ease',
+    ].join(';');
+    _tooltip.textContent = '✨ 화면을 탭하면 테마·글자 크기·넘김 모드를 빠르게 바꿀 수 있어요.';
+
+    document.body.appendChild(_mask);
+    document.body.appendChild(_tooltip);
+    requestAnimationFrame(() => {
+      if (_mask) _mask.style.opacity = '1';
+      if (_tooltip) _tooltip.style.opacity = '1';
+    });
+
+    _autoCloseTimer = setTimeout(_dismiss, 4200);
+    ResourceRegistry.addTimer(_autoCloseTimer);
+  }
+
+  function maybeShow() {
+    if (_alreadyShown()) return;
+
+    clearTimeout(_timer);
+    _timer = setTimeout(() => {
+      QuickSettingsPopover.open();
+      requestAnimationFrame(_render);
+    }, 900);
+    ResourceRegistry.addTimer(_timer);
+  }
+
+  return { maybeShow };
 })();
 
 /* ══════════════════════════════════════════════════════════
@@ -666,6 +761,34 @@ const ReadingReport = (() => {
 /* ══════════════════════════════════════════════════════════
    §23-D. 3D 종이 넘김 페이지 전환 레이어
    ══════════════════════════════════════════════════════════ */
+/*
+ * [v5.0 신규 — 고도화 #6] CSS 하드웨어 가속 강제 스위칭
+ * ─────────────────────────────────────────────────────────────────
+ * 기존 .fable-ptx--slide / .fable-ptx--flip-out / .fable-ptx--flip-in
+ * 클래스는 transform/opacity 애니메이션만 정의했을 뿐 will-change
+ * 힌트가 없었다. will-change 없이도 transform 애니메이션은 보통
+ * 브라우저가 자체적으로 합성 레이어를 추론하지만, 애니메이션 시작과
+ * 동시에 레이어 승격(promotion)이 일어나면 첫 프레임에 합성 비용이
+ * 몰려 끊김(jank)이 발생할 수 있다. 애니메이션 시작 "직전"에
+ * will-change: transform, opacity를 명시적으로 주입하면 브라우저가
+ * 미리 GPU 레이어를 준비해두므로(레이어 승격을 애니메이션 시작 이전
+ * 시점으로 앞당김), 자바스크립트 메인 스레드 연산 부담을 줄이고
+ * 첫 프레임부터 GPU 합성 경로를 타도록 강제할 수 있다.
+ *
+ * 애니메이션 종료 후에는 will-change를 'auto'로 되돌려 GPU 메모리상의
+ * 합성 레이어를 해제한다 — will-change를 영구히 남겨두면 오히려
+ * 불필요한 레이어가 계속 유지되어 메모리/GPU 자원을 낭비하므로,
+ * "전환이 진행되는 구간에서만" 한시적으로 활성화하는 것이 핵심이다.
+ */
+function _applyWillChange(el, props) {
+  if (!el || !el.style) return;
+  el.style.willChange = props;
+}
+function _clearWillChange(el) {
+  if (!el || !el.style) return;
+  el.style.willChange = 'auto';
+}
+
 const PageTransitionEngine = (() => {
   let _busy = false;
   const CSS = `
@@ -689,6 +812,24 @@ const PageTransitionEngine = (() => {
     _cssInjected = true;
   }
 
+  /*
+   * [v5.0] 페이지 넘김 모드(flip3d/slide) 활성화 시 실제 책 콘텐츠를
+   * 담는 viewer-viewport 자체에도 will-change를 동적으로 토글한다.
+   * fade 모드는 transform을 사용하지 않으므로(순수 opacity) GPU 레이어
+   * 승격의 이득이 작아 will-change를 적용하지 않고 자바스크립트 연산
+   * 경로를 그대로 둔다 — 불필요한 합성 레이어 생성을 피해 메모리
+   * 사용을 최소화하는 선택적 적용이다.
+   */
+  function syncHardwareAcceleration(mode) {
+    const vp = _getViewport();
+    if (!vp || vp === DOMProxy.VOID_NODE) return;
+    if (mode === 'flip3d' || mode === 'slide') {
+      _applyWillChange(vp, 'transform, opacity');
+    } else {
+      _clearWillChange(vp);
+    }
+  }
+
   function run(direction = 'next') {
     if (_busy) return;
     const mode = store.pageTransition || 'fade';
@@ -704,9 +845,12 @@ const PageTransitionEngine = (() => {
     const vp = _getViewport();
     const layer = document.createElement('div');
     layer.className = 'fable-ptx-layer fable-ptx--fade';
+    /* fade는 opacity 단독 전환이라 GPU 레이어 강제 승격 이득이 작지만,
+       다른 두 모드와 동일한 일관된 인터페이스를 위해 가벼운 힌트만 부여. */
+    _applyWillChange(layer, 'opacity');
     vp.appendChild(layer);
-    layer.addEventListener('animationend', () => { layer.remove(); _busy = false; }, { once: true });
-    setTimeout(() => { if (layer.parentNode) { layer.remove(); _busy = false; } }, 500);
+    layer.addEventListener('animationend', () => { _clearWillChange(layer); layer.remove(); _busy = false; }, { once: true });
+    setTimeout(() => { if (layer.parentNode) { _clearWillChange(layer); layer.remove(); _busy = false; } }, 500);
   }
 
   function _runSlide(direction) {
@@ -715,9 +859,12 @@ const PageTransitionEngine = (() => {
     const layer = document.createElement('div');
     layer.className = 'fable-ptx-layer fable-ptx--slide';
     if (direction === 'prev') layer.style.animationName = 'fable-slide-in-rev';
+    /* [v5.0] 슬라이드 전환 시작 직전 will-change를 주입해 GPU 합성
+       레이어를 애니메이션 첫 프레임 이전에 미리 준비시킨다. */
+    _applyWillChange(layer, 'transform, opacity');
     vp.appendChild(layer);
-    layer.addEventListener('animationend', () => { layer.remove(); _busy = false; }, { once: true });
-    setTimeout(() => { if (layer.parentNode) { layer.remove(); _busy = false; } }, 600);
+    layer.addEventListener('animationend', () => { _clearWillChange(layer); layer.remove(); _busy = false; }, { once: true });
+    setTimeout(() => { if (layer.parentNode) { _clearWillChange(layer); layer.remove(); _busy = false; } }, 600);
   }
 
   function _runFlip3D(direction) {
@@ -726,21 +873,34 @@ const PageTransitionEngine = (() => {
     const layerOut = document.createElement('div');
     layerOut.className = 'fable-ptx-layer fable-ptx--flip-out';
     layerOut.style.transformOrigin = direction === 'next' ? 'left center' : 'right center';
+    /* [v5.0] 3D 회전(rotateY)은 합성 비용이 가장 크므로 will-change를
+       반드시 명시해 자바스크립트 메인 스레드 연산을 줄이고 GPU 경로를
+       강제한다. backface-visibility는 fx.css의 .page-transition-flip3d
+       규칙에서 이미 보존되고 있으므로 여기서는 will-change만 보강한다. */
+    _applyWillChange(layerOut, 'transform, opacity');
     vp.appendChild(layerOut);
     const layerIn = document.createElement('div');
     layerIn.className = 'fable-ptx-layer fable-ptx--flip-in';
     layerIn.style.transformOrigin = direction === 'next' ? 'right center' : 'left center';
+    _applyWillChange(layerIn, 'transform, opacity');
     vp.appendChild(layerIn);
-    layerOut.addEventListener('animationend', () => layerOut.remove(), { once: true });
-    layerIn.addEventListener('animationend',  () => { layerIn.remove(); _busy = false; }, { once: true });
+    layerOut.addEventListener('animationend', () => { _clearWillChange(layerOut); layerOut.remove(); }, { once: true });
+    layerIn.addEventListener('animationend',  () => { _clearWillChange(layerIn); layerIn.remove(); _busy = false; }, { once: true });
     setTimeout(() => {
-      [layerOut, layerIn].forEach(el => { if (el.parentNode) el.remove(); });
+      [layerOut, layerIn].forEach(el => { _clearWillChange(el); if (el.parentNode) el.remove(); });
       _busy = false;
     }, 600);
   }
 
-  return { run };
+  return { run, syncHardwareAcceleration };
 })();
+
+/* [v5.0] pageTransition 변경 시 viewer-viewport의 will-change를 즉시
+   동기화 — 사용자가 설정 패널에서 모드를 바꾸는 순간부터 다음 페이지
+   넘김 애니메이션이 올바른 가속 모드로 시작되도록 한다. */
+ReactiveStore.subscribe('pageTransition', (mode) => {
+  PageTransitionEngine.syncHardwareAcceleration(mode || 'fade');
+});
 
 /* ══════════════════════════════════════════════════════════
    §23-E. [v5.0 신규] 맥락형 빠른 설정(Contextual Quick Settings) 팝오버
@@ -852,6 +1012,18 @@ const QuickSettingsPopover = (() => {
     ResourceRegistry.addTimer(_autoCloseTimer);
   }
 
+  /*
+   * [버그 수정 — C-3] 햅틱 반응 피드백 세분화 — 빠른 설정 버튼
+   * ─────────────────────────────────────────────────────────────
+   * 목표 달성 세레머니의 연속 진동(50-30-50ms)과 명확히 구분되도록,
+   * 빠른 설정 패널의 단순 토글/증감 버튼에는 가벼운 단일 탭(10ms)만
+   * 적용한다. Vibration API 미지원 환경 또는 사용자 상호작용 이전
+   * 호출 시 발생하는 예외는 조용히 무시한다(A-9 가드).
+   */
+  function _lightTapHaptic() {
+    try { navigator.vibrate?.(10); } catch (_) {}
+  }
+
   function open() {
     if (!el) {
       _injectCSSOnce();
@@ -864,6 +1036,7 @@ const QuickSettingsPopover = (() => {
 
       el.querySelector('#qsp-btn-theme').addEventListener('click', (e) => {
         e.stopPropagation();
+        _lightTapHaptic();
         const idx = THEME_CYCLE.indexOf(store.theme);
         const next = THEME_CYCLE[(idx + 1 + THEME_CYCLE.length) % THEME_CYCLE.length] || 'paper';
         store.theme = next;
@@ -873,17 +1046,20 @@ const QuickSettingsPopover = (() => {
 
       el.querySelector('#qsp-btn-font-minus').addEventListener('click', (e) => {
         e.stopPropagation();
+        _lightTapHaptic();
         store.fontSize = Math.max(60, store.fontSize - 5);
         _resetAutoCloseTimer();
       });
       el.querySelector('#qsp-btn-font-plus').addEventListener('click', (e) => {
         e.stopPropagation();
+        _lightTapHaptic();
         store.fontSize = Math.min(200, store.fontSize + 5);
         _resetAutoCloseTimer();
       });
 
       el.querySelector('#qsp-btn-flow').addEventListener('click', async (e) => {
         e.stopPropagation();
+        _lightTapHaptic();
         const next = store.flow === 'scrolled' ? 'paginated' : 'scrolled';
         store.flow = next;
         try { await switchFlowMode(next); } catch (err) { ErrorBoundary.handle('renderer', err, 'qsp:flow'); }
@@ -941,30 +1117,73 @@ const GoalCelebration = (() => {
   const PARTICLE_COLORS = ['#c8864a', '#e0a868', '#a8682e'];
 
   function _vibrate() {
-    /* [햅틱 제안] 짧은 더블 펄스 — 디바이스가 미지원이면 자동 무시 */
-    try { navigator.vibrate?.([40, 60, 40]); } catch (_) {}
+    /*
+     * [버그 수정 — C-3] 햅틱 반응 피드백 세분화 — 목표 달성 세레머니
+     * ─────────────────────────────────────────────────────────────
+     * 앰버 파티클 버스트(_burstFrom)와 동기화된 연속 바이브레이션
+     * 패턴(50ms 진동 - 30ms 정지 - 50ms 진동)을 사용한다. 빠른 설정
+     * 버튼의 가벼운 단일 탭(10ms)과 명확히 구분되는 "성취감"의
+     * 강도와 리듬을 전달한다. 디바이스가 미지원이거나 사용자
+     * 상호작용 이전 호출(권한 예외) 시에는 조용히 무시한다.
+     */
+    try { navigator.vibrate?.([50, 30, 50]); } catch (_) {}
   }
 
   function _playChime() {
-    /* [효과음 제안] Web Audio 기반 짧은 차임벨 — 합성음이므로 외부
-       리소스 의존 없이 즉시 재생 가능. 오디오 컨텍스트 생성 실패(자동
-       재생 정책 등) 시 조용히 무시한다. */
+    /*
+     * [버그 수정 — D-10] 목표 달성 차임 사운드 디자인 개선
+     * ─────────────────────────────────────────────────────────────
+     * 기존에는 880Hz→1320Hz로 상승하는 단일 사인파에 컴프레서나
+     * 저역 필터가 전혀 없어, 고주파 + 무가공 신호 특유의 가늘고
+     * 찌르는 듯한 인상을 주었다. 개선안:
+     *   1) 기준 주파수를 따뜻하고 차분한 대역(523Hz, 음악적으로 C5)
+     *      으로 낮춰 시작하고 완만하게 상승시킨다.
+     *   2) BiquadFilterNode(lowpass, cutoff 2400Hz)를 신호 경로에
+     *      추가해 고주파 성분의 거친 질감을 부드럽게 깎아낸다.
+     *   3) DynamicsCompressorNode를 게인 다음, destination 직전에
+     *      배치하여 피크를 완만하게 눌러 일관되고 부드러운 다이내믹을
+     *      만든다.
+     * 신호 경로: osc → filter(lowpass) → gain(envelope) → compressor
+     *           → destination
+     * 기존의 envelope 램프 패턴과 ctx.close() 정리 흐름은 그대로
+     * 유지하여 리소스 누수 없이 동작한다.
+     */
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx) return;
       const ctx = new Ctx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
+
+      const osc        = ctx.createOscillator();
+      const filter      = ctx.createBiquadFilter();
+      const gain        = ctx.createGain();
+      const compressor   = ctx.createDynamicsCompressor();
+
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.18);
+      osc.frequency.setValueAtTime(523.25, ctx.currentTime);                          /* C5 — 따뜻한 기준음 */
+      osc.frequency.exponentialRampToValueAtTime(659.25, ctx.currentTime + 0.22);      /* E5 — 완만한 상승 */
+
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(2400, ctx.currentTime);
+      filter.Q.setValueAtTime(0.7, ctx.currentTime);
+
       gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
-      osc.connect(gain); gain.connect(ctx.destination);
+      gain.gain.exponentialRampToValueAtTime(0.16, ctx.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.6);
+
+      compressor.threshold.setValueAtTime(-24, ctx.currentTime);
+      compressor.knee.setValueAtTime(18, ctx.currentTime);
+      compressor.ratio.setValueAtTime(8, ctx.currentTime);
+      compressor.attack.setValueAtTime(0.003, ctx.currentTime);
+      compressor.release.setValueAtTime(0.25, ctx.currentTime);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(compressor);
+      compressor.connect(ctx.destination);
+
       osc.start();
-      osc.stop(ctx.currentTime + 0.5);
-      setTimeout(() => { try { ctx.close(); } catch (_) {} }, 600);
+      osc.stop(ctx.currentTime + 0.6);
+      setTimeout(() => { try { ctx.close(); } catch (_) {} }, 700);
     } catch (_) {}
   }
 
@@ -1193,15 +1412,45 @@ const ReadingStatsTracker = (() => {
   let timer = null;
   let pendingSeconds = 0;
 
-  /* [v5.0] 날짜가 바뀌면 goalCelebrationShown 가드를 리셋하여
-     다음날 목표 달성 시에도 세레머니가 재발동하도록 한다. */
+  /*
+   * [v5.0 신규 — 고도화 #3] GoalCelebration 주행 가드 정밀화
+   * ─────────────────────────────────────────────────────────────────
+   * 기존 한계: _checkDateRollover()가 startSession() 호출 시점에만
+   * 실행되었다. 자정 전(예: 23:50)에 독서를 시작해 세션을 끝내지 않고
+   * 자정을 넘겨 계속 읽는 경우, setInterval은 계속 같은 세션으로
+   * 동작하므로 startSession()이 재호출되지 않아 goalCelebrationShown
+   * 가드가 갱신되지 않는다. 즉 "오늘 목표 달성 1회성 트리거"가 날짜가
+   * 바뀐 뒤에도 실제로는 갱신되지 않을 수 있었다.
+   *
+   * 개선: 날짜 롤오버 체크를 1초 간격 tick(_updateUI 직전)에서도
+   * 수행한다. 로컬 타임존 기준 Date().toDateString() 데이트 스탬프를
+   * localStorage에 저장된 마지막 키와 비교하는 방식은 그대로 유지하되,
+   * "세션 시작 시점"이 아니라 "매 tick"으로 검사 지점을 옮겨 자정을
+   * 넘기는 장시간 세션에서도 정확히 1회만 리셋되도록 한다. 같은 틱
+   * 안에서 중복 리셋이 발생하지 않도록 localStorage 키 갱신을 비교-후-
+   * 기록 패턴으로 원자적으로 처리한다.
+   *
+   * 추가로, progress fill의 dataset.notified DOM 가드는 날짜가 바뀌어도
+   * 자동으로 초기화되지 않는 별도의 1회성 트리거였다. 날짜 롤오버 시
+   * 이 DOM 가드도 함께 리셋하여, store.goalCelebrationShown과
+   * dataset.notified 두 가드가 항상 같은 "오늘" 기준으로 동기화되도록
+   * 보장한다(불일치 시 자정 이후 목표 재달성에도 세레머니가 끝까지
+   * 재발동하지 않는 회귀를 차단).
+   */
   function _checkDateRollover() {
     const todayKey = new Date().toDateString();
     const lastKey  = localStorage.getItem('fable_goal_celebration_date');
-    if (lastKey !== todayKey) {
-      localStorage.setItem('fable_goal_celebration_date', todayKey);
-      GoalCelebration.resetDailyGuard();
+    if (lastKey === todayKey) return false;
+
+    localStorage.setItem('fable_goal_celebration_date', todayKey);
+    GoalCelebration.resetDailyGuard();
+
+    /* DOM 레벨 1회성 가드도 함께 리셋 — store 가드와 동기화 보장 */
+    const fill = DOMProxy.get('goal-progress-fill');
+    if (fill && fill !== DOMProxy.VOID_NODE && fill.dataset) {
+      delete fill.dataset.notified;
     }
+    return true;
   }
 
   function startSession() {
@@ -1210,6 +1459,9 @@ const ReadingStatsTracker = (() => {
     clearInterval(timer);
     timer = setInterval(() => {
       if (document.visibilityState === 'visible') {
+        /* [v5.0] 매 tick마다 날짜 롤오버를 점검해, 자정을 넘기는
+           장시간 세션에서도 가드가 정확히 1회만 리셋되도록 한다. */
+        _checkDateRollover();
         store.readingSession.accumulated++;
         pendingSeconds++;
         _updateUI();
@@ -1319,17 +1571,53 @@ function initContextMenu() {
 /* ══════════════════════════════════════════════════════════
    §29. Annotation Manager
    ══════════════════════════════════════════════════════════ */
+
+/*
+ * [버그 수정 — C-8] 다크모드 전환 시 스마트 하이라이터 컬러 보정
+ * ─────────────────────────────────────────────────────────────
+ * epub.js의 rendition.annotations.add()는 'highlight' 타입에 대해
+ * className만으로는 실제 SVG fill 색상이 바뀌지 않는다(고정값
+ * fill:'yellow' 폴백) — styles 인자(6번째 파라미터)로 직접
+ * fill/fill-opacity를 지정해야 한다. 또한 라이트 테마 기준의
+ * 고정 알파값을 다크 테마에 그대로 쓰면 형광펜이 과도하게 밝아
+ * 눈부심을 유발한다. 색상별 베이스 hue는 유지하면서, 테마에 따라
+ * fill-opacity와 명도를 실시간 보정한다.
+ */
+const HIGHLIGHT_COLORS = {
+  yellow: { light: '#ffd83c', dark: '#ad8a1a' },
+  blue:   { light: '#64b4ff', dark: '#3d6f99' },
+  green:  { light: '#5fdc8c', dark: '#327a4e' },
+};
+
+function _resolveHighlightStyle(colorKey) {
+  const def = HIGHLIGHT_COLORS[colorKey] || HIGHLIGHT_COLORS.yellow;
+  const isDark = store.theme === 'dark';
+  return {
+    fill: isDark ? def.dark : def.light,
+    'fill-opacity': isDark ? '0.38' : '0.34',
+    'mix-blend-mode': 'multiply',
+  };
+}
+
 const AnnotationManager = (() => {
   let _rendition = null;
+  /* 현재 뷰에 적용된 어노테이션을 테마 변경 시 재도색하기 위해
+     cfiRange/color/uuid를 보존해 둔다. */
+  let _activeAnnotations = [];
 
   function init(rendition) {
     _rendition = rendition;
+    _activeAnnotations = [];
     rendition.on('selected', async (cfiRange, contents) => {
       const sel = contents.window.getSelection();
       if (!sel || sel.isCollapsed || sel.toString().trim().length < 2) return;
       try {
         const ann = await AnnotationSyncEngine.create(store.bookKey, cfiRange, sel.toString().trim(), 'yellow');
-        rendition.annotations.add('highlight', cfiRange, { uuid: ann.uuid }, null, 'hl-yellow');
+        rendition.annotations.add(
+          'highlight', cfiRange, { uuid: ann.uuid }, null,
+          'hl-yellow', _resolveHighlightStyle('yellow'),
+        );
+        _activeAnnotations.push({ cfiRange, uuid: ann.uuid, color: 'yellow' });
         Toast.show('하이라이트가 저장되었습니다.', 'success');
       } catch (e) {
         ErrorBoundary.handle('storage', e, 'annotation:create');
@@ -1340,14 +1628,41 @@ const AnnotationManager = (() => {
   function restoreAll(annotations) {
     if (!_rendition) return;
     annotations.forEach(ann => {
-      try { _rendition.annotations.add('highlight', ann.cfiRange, { uuid: ann.uuid }, null, 'hl-' + (ann.color || 'yellow')); }
-      catch (_) {}
+      const color = ann.color || 'yellow';
+      try {
+        _rendition.annotations.add(
+          'highlight', ann.cfiRange, { uuid: ann.uuid }, null,
+          'hl-' + color, _resolveHighlightStyle(color),
+        );
+        _activeAnnotations.push({ cfiRange: ann.cfiRange, uuid: ann.uuid, color });
+      } catch (_) {}
     });
   }
 
-  function reset() { _rendition = null; }
+  /*
+   * [버그 수정 — C-8] 테마 전환 시 형광펜 재도색
+   * ─────────────────────────────────────────────────────────────
+   * epub.js는 이미 그려진 SVG highlight의 fill을 사후에 바꿀 API를
+   * 제공하지 않으므로, 동일 cfiRange에 대해 remove 후 새 스타일로
+   * 다시 add하는 방식으로 갱신한다. reapplyInlineTheme()과 같은
+   * 흐름에서 store.theme 변경 직후 호출되도록 main.js에서 연동한다.
+   */
+  function repaintForTheme() {
+    if (!_rendition || !_activeAnnotations.length) return;
+    _activeAnnotations.forEach(({ cfiRange, uuid, color }) => {
+      try {
+        _rendition.annotations.remove(cfiRange, 'highlight');
+        _rendition.annotations.add(
+          'highlight', cfiRange, { uuid }, null,
+          'hl-' + color, _resolveHighlightStyle(color),
+        );
+      } catch (_) {}
+    });
+  }
 
-  return { init, restoreAll, reset };
+  function reset() { _rendition = null; _activeAnnotations = []; }
+
+  return { init, restoreAll, reset, repaintForTheme };
 })();
 
 /* §34. 스크롤 맨위로 버튼 */
@@ -1732,34 +2047,90 @@ const CloudBackup = (() => {
 
 /* ══════════════════════════════════════════════════════════
    §40. Pomodoro 독서 타이머
+   ─────────────────────────────────────────────────────────
+   [v5.0 신규 — 고도화 #9] 백그라운드 오프셋 보정
+   ─────────────────────────────────────────────────────────
+   기존 한계: setInterval(_tick, 1000)이 매 호출마다 remaining을
+   단순히 1씩 감소시키는 "카운트다운" 방식이었다. PWA가 백그라운드로
+   전환되면(탭 비활성, 화면 잠금 등) 브라우저가 setInterval 콜백을
+   스로틀하거나 완전히 정지시킨다. 복귀 시 밀린 tick들이 한꺼번에
+   몰리거나 누락되어, 실제 경과 시간과 화면에 표시된 remaining 값이
+   어긋나는 드리프트(drift)가 발생했다 — 예를 들어 1분간 백그라운드에
+   있었다면 실제로는 25:00 → 24:00이어야 하지만, setInterval이
+   정지했다가 복귀 후 단 한 번의 tick만 실행되면 24:59로 표시되는
+   식의 오차가 누적된다.
+
+   개선: remaining을 "매 tick마다 1씩 빼는" 상대적 카운터가 아니라,
+   고정된 목표 종료 시각(_targetEndPerf, performance.now() 기준
+   monotonic 타임스탬프)에서 현재 시각을 뺀 값으로 매번 다시 계산하는
+   절대 기준 방식으로 전환했다. performance.now()는 시스템 시계 변경
+   (사용자가 OS 시계를 조정하는 경우)에도 영향받지 않는 단조 증가
+   타이머이므로, setInterval의 호출 빈도가 불규칙해지더라도(스로틀,
+   탭 비활성 중 누락 등) 다음 tick이 실행되는 시점에 실제 경과
+   시간을 정확히 반영해 자동으로 보정된다. 즉 콜백이 얼마나 자주
+   호출되었는지가 아니라 "지금이 목표 시각으로부터 얼마나 지났는가"
+   만으로 remaining을 도출하므로 드리프트가 구조적으로 발생하지 않는다.
+
+   추가로 store.appInBackground 구독을 통해, 포모도로 팝업이 열려
+   있는 동안 백그라운드로 전환되었다가 복귀하는 순간 즉시 1회
+   재계산(_syncFromTarget)을 수행하여 화면 표시값이 다음 정규 tick
+   (최대 1초)을 기다리지 않고 즉시 정확한 값으로 갱신되도록 한다.
    ══════════════════════════════════════════════════════════ */
 const Pomodoro = (() => {
   const FOCUS = 25 * 60, BREAK = 5 * 60;
-  let remaining = FOCUS, mode = 'idle', timer = null;
+  let remaining       = FOCUS;
+  let mode             = 'idle';
+  let timer            = null;
+  let _targetEndPerf   = null; /* performance.now() 기준 목표 종료 시각 */
 
   function _fmt(s) {
     const m = Math.floor(s / 60), sec = s % 60;
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
 
+  /* [v5.0] 목표 종료 시각 기준으로 remaining을 절대 재계산한다.
+     setInterval 호출 누락/지연 여부와 무관하게 항상 정확한 값을
+     도출하므로, 백그라운드 복귀 시에도 추가 보정 로직이 필요 없다. */
+  function _recalcRemaining() {
+    if (_targetEndPerf === null) return remaining;
+    const remainMs = _targetEndPerf - performance.now();
+    return Math.max(0, Math.ceil(remainMs / 1000));
+  }
+
+  function _setTarget(seconds) {
+    remaining     = seconds;
+    _targetEndPerf = performance.now() + seconds * 1000;
+  }
+
   function _tick() {
-    remaining--;
+    remaining = _recalcRemaining();
     setTextSafe(DOMProxy.get('pomodoro-time'), _fmt(remaining));
     if (remaining <= 0) {
       if (mode === 'focus') {
         Toast.show('🍅 집중 시간 완료! 5분 휴식하세요.', 'success');
-        mode = 'break'; remaining = BREAK;
+        mode = 'break';
+        _setTarget(BREAK);
       } else {
         Toast.show('휴식 끝! 다시 집중해 볼까요?', 'info');
-        mode = 'focus'; remaining = FOCUS;
+        mode = 'focus';
+        _setTarget(FOCUS);
       }
       store.pomodoroState = mode;
       _updateModeLabel();
     }
   }
 
+  /* 백그라운드 복귀 즉시(다음 정규 tick을 기다리지 않고) 화면을
+     재동기화한다 — 목표 시각이 이미 지나 있었다면 모드 전환까지
+     즉시 처리해 누락된 라운드 전환이 방치되지 않도록 한다. */
+  function _syncFromTarget() {
+    if (!timer || _targetEndPerf === null) return;
+    _tick();
+  }
+
   function start() {
-    if (mode === 'idle') { mode = 'focus'; remaining = FOCUS; }
+    if (mode === 'idle') { mode = 'focus'; _setTarget(FOCUS); }
+    else if (_targetEndPerf === null) { _setTarget(remaining); }
     store.pomodoroState = mode;
     _updateModeLabel();
     clearInterval(timer);
@@ -1770,13 +2141,18 @@ const Pomodoro = (() => {
   }
 
   function pause() {
+    /* 일시정지 시점의 실제 남은 시간을 동결해, 재개(start) 시
+       _setTarget(remaining)으로 정확히 이어서 재개되도록 한다. */
+    remaining = _recalcRemaining();
+    _targetEndPerf = null;
     clearInterval(timer);
     timer = null;
     setTextSafe(DOMProxy.get('btn-pomodoro-toggle'), '▶');
   }
 
   function reset() {
-    clearInterval(timer); timer = null; mode = 'idle'; remaining = FOCUS;
+    clearInterval(timer); timer = null; mode = 'idle';
+    remaining = FOCUS; _targetEndPerf = null;
     store.pomodoroState = 'idle';
     setTextSafe(DOMProxy.get('pomodoro-time'), _fmt(FOCUS));
     _updateModeLabel();
@@ -1809,6 +2185,15 @@ const Pomodoro = (() => {
       pause();
       DOMProxy.get('pomodoro-popup').style.display = 'none';
     });
+
+    /* [v5.0] 백그라운드 → 포그라운드 복귀 즉시 재동기화.
+       타이머가 실행 중일 때만 의미가 있으므로 _syncFromTarget 내부에서
+       timer 존재 여부를 가드한다(idle/일시정지 상태에서는 no-op). */
+    ResourceRegistry.addStoreSub(
+      ReactiveStore.subscribe('appInBackground', (hidden) => {
+        if (!hidden) _syncFromTarget();
+      })
+    );
   }
 
   return { init, start, pause, reset, toggle, openPopup };
@@ -1825,6 +2210,7 @@ export {
   runSearchExecution,
   injectSearchHighlight,
   OnboardingGuide,
+  QuickSettingsHint,
   ReadingReport,
   PageTransitionEngine,
   QuickSettingsPopover,
