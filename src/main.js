@@ -1262,10 +1262,27 @@ async function initializeSystemCore() {
   await StorageSystem.init()?.catch(err => ErrorBoundary.handle('storage', err, 'init'));
 
   mountReactiveBinders();
-  /* [v5.0] LS→Store→UI 원자적 동기화 — 분리 호출로 인한 중간 불일치
-     윈도우를 차단한다(고도화 #8). */
-  _atomicSyncSettingsPipeline();
+  /*
+   * [버그 수정 — 부팅 순서 교정] 설정 패널 DOM 마운트 → 원자적 동기화
+   * ─────────────────────────────────────────────────────────────────
+   * 기존에는 _atomicSyncSettingsPipeline()이 initButtonEventHandlers()
+   * 보다 먼저 실행되었다. initButtonEventHandlers() 내부의
+   * initFontUploader/initFontSelector/initCustomThemeBuilder/
+   * initV4SettingsUI(→ initFxSettingsUI, _mountReadingProfileSection,
+   * _mountAdvancedSettingsSection 등)가 바로 설정 패널의 실제 DOM
+   * 요소와 ReactiveStore.subscribe 구독을 생성하는 지점이므로, 이
+   * 순서에서는 _forceSyncSettingsUI()가 호출되는 시점에 해당 DOM이
+   * 아직 존재하지 않아 DOMProxy.exists() 가드가 전부 무효화되었다.
+   * (각 위젯이 자기 마운트 시점에 store 값을 별도로 다시 읽어 1차
+   * 페인트는 우연히 정상 동작했지만, 강제 동기화 자체는 공회전했다.)
+   *
+   * 해결: initButtonEventHandlers()를 먼저 실행해 설정 패널 DOM과
+   * 구독을 전부 마운트한 뒤, _atomicSyncSettingsPipeline()을 실행하여
+   * LS→Store→UI 동기화가 실제 존재하는 DOM에 명시적으로 적용되도록
+   * 순서를 교정한다.
+   */
   initButtonEventHandlers();
+  _atomicSyncSettingsPipeline();
   initOfflineBanner();
   initContextMenu();
 

@@ -43,6 +43,20 @@
 export const LH_MAP     = { narrow: '1.5', normal: '1.85', wide: '2.3' };
 
 /**
+ * [디버그 모드 감지] Null-Safe 환경 변수 접근
+ * ─────────────────────────────────────────────────────────────────
+ * main.js의 _envMode()와 동일한 의도이나, store.js는 의존성 최하단
+ * 모듈이므로 main.js를 import하지 않는다(순환 참조 차단 원칙 유지).
+ * import.meta.env는 Vite가 모든 모듈에 정적으로 주입하므로 별도
+ * import 없이 이 파일 자체에서 독립적으로 판별 가능하다.
+ */
+const _isDebugMode = (() => {
+  try {
+    return typeof import.meta !== 'undefined' && !!import.meta?.env?.DEV;
+  } catch (_) { return false; }
+})();
+
+/**
  * [v5.0 신규] 독서 프로필(Visual Presets) 정의
  * 프리셋 클릭 시 fontSize / lineHeight / userSpacing / fontWeightBoost를
  * 한 번에 ReactiveStore에 동기화하기 위한 단일 진실 공급원(Single Source of Truth).
@@ -318,6 +332,9 @@ export const ReactiveStore = (() => {
   }
 
   function _notify(key) {
+    if (_isDebugMode) {
+      console.trace(`[Fable:store] state transition → "${key}" =`, store[key]);
+    }
     pendingKeys.add(key);
     if (!microQueued) { microQueued = true; queueMicrotask(_microFlush); }
   }
@@ -460,12 +477,19 @@ export const ReactiveStore = (() => {
   });
 
   function subscribe(key, fn) {
+    /* [Null-Safe 가드] key 누락 또는 fn이 호출 가능하지 않으면 즉시
+       무시 — 잘못된 구독 등록이 런타임 크래시로 번지는 것을 차단한다. */
+    if (key == null || typeof fn !== 'function') return () => {};
     if (!subscribers.has(key)) subscribers.set(key, new Set());
     subscribers.get(key).add(fn);
     return () => subscribers.get(key)?.delete(fn);
   }
 
   function patch(updates) {
+    /* [Null-Safe 가드] updates가 순회 가능한 일반 객체가 아니면 즉시
+       반환 — Object.entries(null/undefined) 호출로 인한 TypeError를
+       원천 차단한다. */
+    if (!updates || typeof updates !== 'object') return;
     /* Object.entries 순회 자체가 단일 동기 컨텍스트이므로, 여러 키가
        한 번에 바뀌어도 microtask 마감 전까지 같은 pendingKeys Set에
        합류해 단일 배치로 플러시된다(추가 디바운스 불필요). */
